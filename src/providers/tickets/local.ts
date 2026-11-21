@@ -20,13 +20,38 @@ export class LocalTicketSource implements TicketSource {
     return this.store.db.query<Ticket, [number]>("SELECT * FROM tickets WHERE id = ?").get(id);
   }
 
-  create(input: { repo: string; title: string; body: string }): Ticket {
+  create(input: Parameters<TicketSource["create"]>[0]): Ticket {
     const row = this.store.db
       .query<{ id: number }, any>(
-        "INSERT INTO tickets (repo, title, body, source) VALUES ($repo, $title, $body, 'local') RETURNING id",
+        `INSERT INTO tickets (repo, title, body, source, status, confidence, decision_id, noticed_id)
+         VALUES ($repo, $title, $body, $source, $status, $confidence, $decision_id, $noticed_id) RETURNING id`,
       )
-      .get(input)!;
+      .get({
+        repo: input.repo,
+        title: input.title,
+        body: input.body,
+        source: input.source ?? "local",
+        status: input.status ?? "todo",
+        confidence: input.confidence ?? null,
+        decision_id: input.decision_id ?? null,
+        noticed_id: input.noticed_id ?? null,
+      })!;
     return this.get(row.id)!;
+  }
+
+  /** Move held tickets from one decision to another (merging duplicate questions), or to proposed. */
+  moveHeld(fromDecision: number, toDecision: number | null): number[] {
+    const ids = this.store.db
+      .query<{ id: number }, [number]>("SELECT id FROM tickets WHERE decision_id = ? AND status = 'held'")
+      .all(fromDecision)
+      .map((r) => r.id);
+    this.store.db
+      .query(
+        `UPDATE tickets SET decision_id = $to, status = CASE WHEN $to IS NULL THEN 'proposed' ELSE status END,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE decision_id = $from AND status = 'held'`,
+      )
+      .run({ from: fromDecision, to: toDecision });
+    return ids;
   }
 
   claim(id: number): boolean {

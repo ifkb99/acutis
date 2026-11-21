@@ -84,6 +84,11 @@ and press **Start**.
 At most 4 runs work at once (`ACUTIS_MAX_RUNS`; `0` means no limit). Runs you start past that
 queue and start as others finish, pause or reach review.
 
+Scouts look through a repo in one area (`acutis scout <repo> infrastructure|tests`, or Run in the
+dashboard's Scouts panel) and file tickets and questions; they land nothing. Questions only you can
+answer go to the Decisions panel (`acutis decisions`), ranked by how much work waits on them. Your
+answer becomes a decision every later worker and scout follows.
+
 Everything the dashboard does is also on the CLI (`bun src/cli.ts` lists it), e.g.:
 
 ```sh
@@ -104,6 +109,10 @@ effort: high
 setup:                 # optional: run in the fresh workspace before the agent starts
   - bun install
 preview: bun --port=$PORT ./index.html   # optional: Acutis runs it; the agent gets preview/browser tools
+scouts:                # optional; every built-in scout is allowed by default, false = off
+  auto_tickets: high   # high-confidence scout tickets go straight to todo (never = all wait in Proposed)
+  budget_usd: 2
+  tests: { focus: "the save/load path" }
 library:               # optional: which tracked docs workers can search (these are the defaults); false = off
   include: ["**/*.md", "**/*.mdx", "**/*.rst", "docs/**/*.txt"]
   exclude: ["**/node_modules/**", "**/vendor/**", ".acutis/**"]

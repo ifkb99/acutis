@@ -112,6 +112,16 @@ code, pre { font-family: var(--mono); font-size: 12.5px; }
 .chip.cancelled { color: var(--muted); }
 .chip.queued { color: var(--muted); border-style: dashed; }
 .noticed-item { display: flex; flex-direction: column; gap: 6px; }
+.decision-item, .scout-repo { display: flex; flex-direction: column; gap: 6px; cursor: default; }
+.decision-item .title, .scout-repo .title { font-weight: 600; font-size: 13px; }
+.decision-item textarea { width: 100%; box-sizing: border-box; font: inherit; }
+.decision-item .detail { color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+.decision-item .held label { font-size: 12px; gap: 6px; }
+.decision-item .muted, .decided .muted, .scout-repo .muted { color: var(--muted); font-size: 12px; }
+.row.wrap { flex-wrap: wrap; }
+.chip.proposed, .chip.held { color: var(--muted); border-style: dashed; }
+.chip.conf-high { color: var(--ok); border-color: var(--ok); }
+.chip.conf-low { color: var(--muted); }
 .noticed-item .title { font-weight: 600; font-size: 13px; }
 .noticed-item .detail { color: var(--muted); font-size: 12px; white-space: pre-wrap; }
 .noticed-item .muted { color: var(--muted); font-size: 12px; }

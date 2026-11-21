@@ -240,6 +240,43 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Scouts and the decision register (2026-11-21, phase 2 of the scouts plan)
+
+- **A scout run is a run with `kind = scout`**, fixed at `start()` from its ticket: each repo has one
+  hidden runner ticket per scout type (`source: scout-run:<type>`), back to `todo` after every run.
+  It reuses the run machinery (slots, queue, permissions, live cost, kill, events). Its workspace at
+  trunk is scratch: it may build and make throwaway edits, nothing lands, and the workspace is removed
+  on any ending. `launch()` and the success path branch on the row's kind, so a scout resumed after a
+  restart keeps its prompt and tools and finishes as `done` without checks or review. Landed-run
+  summaries in the library are work runs only.
+- **Trunk results first.** Setup steps and the declared command checks run through the real paths
+  before the scout starts (its shell differs from the check sandbox), and their results go into its
+  prompt. For a scout, a failure there is a finding, not a run failure.
+- **Lenses live in Acutis** (`core/scouts.ts`): Infrastructure and Tests so far. The workflow's
+  `scouts:` only turns them on or off and sets `focus`, `budget_usd` (default $2) and `auto_tickets`.
+- **Filing.** `propose_ticket` goes to todo at high confidence unless `auto_tickets: never`, otherwise
+  to Proposed. `depends_on` holds it on an open decision. Titles are matched at write time against every
+  ticket in the repo, so a duplicate or a ticket the operator rejected isn't filed again. A noticed
+  report turned into a ticket is marked ticketed only when the ticket is accepted. The limits are 5 tickets
+  and 5 questions per run. Budget: the live-cost poll finishes a scout that goes over mid-turn, keeping
+  what it filed, and the SDK's `maxBudgetUsd` is a hard backstop (set to what's left of the budget;
+  its `error_max_budget_usd` result finishes the scout rather than failing it). A done ticket doesn't
+  block filing the same problem again.
+- **Decision register**, not a question queue: a scout's question (open) and the operator's answer
+  (decided) are one row; a decided row is never edited, only superseded. Open questions are ranked by
+  the tickets held on them, then age. Scouts can update, withdraw or merge open questions of their
+  own type, and every edit bumps a version an answer must match. The operator writes the decision text,
+  to stand alone, because only that text goes into every worker's and scout's prompt (under "written by
+  the human operator"); the scout's question is not repeated there. In the library a decision carries its
+  question, labelled as the scout's. Other scout-written text (tickets, noticed reports, open questions)
+  reaches a scout only as labelled data in its first message. When deciding, held tickets the operator keeps go to
+  todo, those explicitly dropped are cancelled, and any others (say, one filed after they looked) go to
+  Proposed, so nothing is dropped unseen. A restart during a scout's preparation releases its runner ticket.
+- **First real run** (copy of stahl with its full workflow, $0.98 of a $2 budget, 30 turns). All five
+  checks passed on trunk. The scout filed `clippy --all-targets` failing at four exact places (high,
+  straight to todo), unused `bevy_rand`/`rand_core` in the game crate (proposed), and asked whether to
+  pin the Rust toolchain, holding a ticket on it. All three were re-checked by hand and are true.
+
 ### Project library and noticed reports (2026-11-21, phase 1 of the scouts plan)
 
 - **Library.** When a run starts, the repo's docs at its base commit are indexed into SQLite FTS5

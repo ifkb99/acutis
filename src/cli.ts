@@ -22,8 +22,20 @@ Repos and tickets
   acutis ticket add <repo> <title> [--body TEXT | --body-file PATH]
   acutis ticket ls
   acutis ticket cancel <ticket-id>
+  acutis proposed                              Tickets scouts filed that wait for you
+  acutis accept|reject <ticket-id>             Accept a proposed ticket onto todo, or reject it
   acutis noticed [--all]                       Problems workers noticed outside their tickets
   acutis noticed ticket|dismiss <id>           Turn one into a ticket, or dismiss it
+
+Scouts and decisions
+  acutis scout <repo> <type>                   Start a scout (infrastructure, tests); it files tickets and questions
+  acutis decisions [--repo R] [--all]          Open questions, most held work first (--all: every decision)
+  acutis decide <id> --version N <text> [--keep 3,4] [--drop 5]
+                                               Answer a question with the decision workers will follow;
+                                               held tickets in --keep go to todo, --drop are cancelled,
+                                               any others go to proposed
+  acutis decision add <repo> <text>            Record a decision directly
+  acutis decision withdraw <id> | supersede <id> <text>
 
 Runs
   acutis start <ticket-id> [--watch]           Start a run for a ticket
@@ -232,6 +244,10 @@ function formatEvent(e: { id: number; kind: string; data: any }): string | null 
       return `note: ${d.text}${d.artifact ? " [image]" : ""}`;
     case "noticed":
       return `  noticed #${d.id} [${d.kind}] ${d.title}${d.merged ? ` (merged, ×${d.count})` : ""}`;
+    case "scout.ticket":
+      return `  filed ticket #${d.id} [${d.status}, ${d.confidence}] ${d.title}`;
+    case "scout.decision":
+      return `  asked decision #${d.id}: ${d.question}`;
     case "policy.flag":
       return `! ${d.msg} ${(d.files ?? []).join(", ")}`;
     case "system.log":
@@ -415,7 +431,10 @@ switch (cmd) {
       console.log(`#${t.id} ${t.title}`);
     } else if (sub === "ls") {
       const s = await api("/api/state");
-      for (const t of s.tickets) console.log(`#${t.id}\t${t.status}\t${t.repo}\t${t.title}`);
+      for (const t of s.tickets) {
+        if (String(t.source).startsWith("scout-run:")) continue; // a scout's own runner ticket
+        console.log(`#${t.id}\t${t.status}\t${t.repo}\t${t.title}${t.source !== "local" ? `\t(${t.source}${t.confidence ? `, ${t.confidence}` : ""})` : ""}`);
+      }
     } else if (sub === "cancel") {
       const id = runArg(rest[0], "acutis ticket cancel <ticket-id>");
       const t = await post(`/api/tickets/${id}/cancel`);
@@ -425,6 +444,80 @@ switch (cmd) {
   case "dashboard":
     console.log(dashboardLink());
     break;
+  case "scout": {
+    if (!sub || !rest[0]) die("usage: acutis scout <repo> <type>");
+    const run = await post(`/api/repos/${encodeURIComponent(sub)}/scouts/${encodeURIComponent(rest[0])}`);
+    console.log(run.state === "queued" ? `Scout run ${run.id} queued (run limit reached).` : `Scout run ${run.id} started: acutis watch ${run.id}`);
+    break;
+  }
+  case "proposed": {
+    const s = await api("/api/state");
+    const list = s.tickets.filter((t: any) => t.status === "proposed" || t.status === "held");
+    if (!list.length) console.log("Nothing waiting.");
+    for (const t of list) {
+      console.log(`#${t.id}\t${t.status}${t.decision_id ? ` on decision #${t.decision_id}` : ""}\t${t.repo}\t${t.title}\t(${t.source}${t.confidence ? `, ${t.confidence}` : ""})`);
+    }
+    break;
+  }
+  case "accept":
+  case "reject": {
+    const id = runArg(sub, `acutis ${cmd} <ticket-id>`);
+    const t = await post(`/api/tickets/${id}/${cmd}`);
+    console.log(`#${t.id} ${t.status}: ${t.title}`);
+    break;
+  }
+  case "decisions": {
+    const { values } = parseArgs({ args: [sub, ...rest].filter((x): x is string => x !== undefined), options: { repo: { type: "string" }, all: { type: "boolean" } } });
+    const q = new URLSearchParams();
+    if (values.repo) q.set("repo", values.repo);
+    if (values.all) q.set("status", "all");
+    const list = await api(`/api/decisions?${q}`);
+    if (!list.length) console.log(values.all ? "No decisions yet." : "No open questions.");
+    for (const d of list) {
+      if (d.status === "open") {
+        console.log(`#${d.id} v${d.version}\t${d.repo} · ${d.area} · asked by ${d.asked_by}${d.held ? ` · holds ${d.held} ticket(s)` : ""}`);
+        console.log(`\t${d.question}`);
+        if (d.options) for (const o of String(d.options).split("\n").filter(Boolean)) console.log(`\t  - ${o}`);
+        for (const t of d.held_tickets ?? []) console.log(`\t  holds #${t.id}: ${t.title}`);
+        console.log(`\tanswer: acutis decide ${d.id} --version ${d.version} "<your decision, written to stand alone>"${d.held ? " [--keep <ids>] [--drop <ids>]" : ""}`);
+      } else {
+        console.log(`#${d.id}\t${d.status}\t${d.repo} · ${d.area}${d.question ? ` · ${d.question}` : ""}`);
+        if (d.decision) console.log(`\t→ ${d.decision}${d.superseded_by ? ` (superseded by #${d.superseded_by})` : ""}`);
+      }
+    }
+    break;
+  }
+  case "decide": {
+    const { values, positionals } = parseArgs({
+      args: [sub, ...rest].filter((x): x is string => x !== undefined),
+      allowPositionals: true,
+      options: { version: { type: "string" }, keep: { type: "string" }, drop: { type: "string" } },
+    });
+    const id = runArg(positionals[0], "acutis decide <id> --version N <text> [--keep 3,4]");
+    const text = positionals.slice(1).join(" ");
+    if (!values.version || !text) die("usage: acutis decide <id> --version N <text> [--keep 3,4]  (the version is shown by acutis decisions)");
+    const list = (v?: string) => (v ?? "").split(",").filter(Boolean).map(Number);
+    const d = await post(`/api/decisions/${id}/decide`, { decision: text, version: Number(values.version), keep: list(values.keep), drop: list(values.drop) });
+    console.log(`Decision #${d.id} recorded: ${d.decision}`);
+    break;
+  }
+  case "decision": {
+    if (sub === "add") {
+      const [repo, ...words] = rest;
+      if (!repo || !words.length) die("usage: acutis decision add <repo> <text>");
+      const d = await post("/api/decisions", { repo, decision: words.join(" ") });
+      console.log(`Decision #${d.id} recorded for ${repo}.`);
+    } else if (sub === "withdraw") {
+      const id = runArg(rest[0], "acutis decision withdraw <id>");
+      await post(`/api/decisions/${id}/withdraw`);
+      console.log(`Decision #${id} withdrawn; its held tickets wait in proposed.`);
+    } else if (sub === "supersede") {
+      const id = runArg(rest[0], "acutis decision supersede <id> <text>");
+      const d = await post(`/api/decisions/${id}/supersede`, { decision: rest.slice(1).join(" ") });
+      console.log(`Decision #${d.id} replaces #${id}.`);
+    } else die(USAGE);
+    break;
+  }
   case "noticed": {
     if (sub === "ticket" || sub === "dismiss") {
       const id = runArg(rest[0], `acutis noticed ${sub} <id>`);

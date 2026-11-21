@@ -1,5 +1,6 @@
 import { DEFAULT_LIBRARY_EXCLUDE, DEFAULT_LIBRARY_INCLUDE } from "./library";
-import type { BrowserGate, CommandGate, Gate, PreviewSpec, Repo, Ticket, Workflow } from "./types";
+import { DEFAULT_SCOUT_BUDGET_USD, SCOUT_TYPES, decisionsSection } from "./scouts";
+import type { BrowserGate, CommandGate, Decision, Gate, PreviewSpec, Repo, Ticket, Workflow } from "./types";
 
 export const WORKFLOW_PATH = ".acutis/workflow.md";
 
@@ -79,6 +80,7 @@ export function defaultWorkflow(): Workflow {
     template: DEFAULT_TEMPLATE,
     source: "(default)",
     library: { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE] },
+    scouts: { auto_tickets: "high", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {} },
   };
 }
 
@@ -137,6 +139,39 @@ function parseSetup(v: unknown): CommandGate[] {
   return v.map((g, i) => parseCommand(g, "setup step", i));
 }
 
+/**
+ * `scouts: false`, or `scouts: { auto_tickets: high|never, budget_usd: N, <type>: true | false | { focus, budget_usd } }`.
+ * Every built-in scout is allowed unless turned off; the repo can't define new ones.
+ */
+function parseScouts(v: unknown): Workflow["scouts"] {
+  const out = { auto_tickets: "high" as "high" | "never", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {} as Record<string, { enabled: boolean; focus: string; budget_usd?: number }> };
+  if (v === false) return false;
+  if (v === undefined || v === null || v === true) return out;
+  if (typeof v !== "object" || Array.isArray(v)) throw new Error('workflow: "scouts" must be false or a map');
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (k === "auto_tickets") {
+      if (val !== "high" && val !== "never") throw new Error('workflow: "scouts.auto_tickets" must be high or never');
+      out.auto_tickets = val;
+    } else if (k === "budget_usd") {
+      if (typeof val !== "number" || !(val > 0)) throw new Error('workflow: "scouts.budget_usd" must be a positive number');
+      out.budget_usd = val;
+    } else if (SCOUT_TYPES[k]) {
+      if (typeof val === "boolean") out.types[k] = { enabled: val, focus: "" };
+      else if (val && typeof val === "object") {
+        const t = val as Record<string, unknown>;
+        out.types[k] = {
+          enabled: t.enabled !== false,
+          focus: typeof t.focus === "string" ? t.focus.slice(0, 1000) : "",
+          budget_usd: typeof t.budget_usd === "number" && t.budget_usd > 0 ? t.budget_usd : undefined,
+        };
+      } else throw new Error(`workflow: "scouts.${k}" must be true, false or { focus, budget_usd }`);
+    } else {
+      throw new Error(`workflow: unknown scout "${k}" (known: ${Object.keys(SCOUT_TYPES).join(", ")})`);
+    }
+  }
+  return out;
+}
+
 /** `library: false`, or `library: { include: [globs], exclude: [globs] }` (each replaces its default). */
 function parseLibrary(v: unknown): Workflow["library"] {
   if (v === false) return false;
@@ -184,6 +219,7 @@ export function parseWorkflow(text: string, source: string): Workflow {
   else if (meta.land !== undefined) throw new Error('workflow: "land" must be bookmark, push or trunk');
   if (body.trim()) wf.template = body.trim();
   wf.library = parseLibrary(meta.library);
+  wf.scouts = parseScouts(meta.scouts);
   return wf;
 }
 
@@ -201,7 +237,14 @@ export function describeGate(g: Gate): string {
   return g.kind === "cmd" ? g.run : `browser check of ${g.path}${g.script ? ` (script: ${g.script})` : ""}`;
 }
 
-export function workerSystemPrompt(opts: { ticket: Ticket; cwd: string; workflow: Workflow; repo?: Repo; sandboxed?: boolean }): string {
+export function workerSystemPrompt(opts: {
+  ticket: Ticket;
+  cwd: string;
+  workflow: Workflow;
+  repo?: Repo;
+  sandboxed?: boolean;
+  decisions?: Decision[];
+}): string {
   const gates = opts.workflow.gates.length
     ? opts.workflow.gates.map((g) => `- \`${describeGate(g)}\``).join("\n")
     : "- (none configured)";
@@ -247,7 +290,7 @@ Project knowledge: \`mcp__acutis__search_project\` searches this repo's docs (as
       : ""
   }
 
-Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket.${preview}${notes}
+Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket.${preview}${notes}${decisionsSection(opts.decisions ?? [])}
 
 End with a short summary: what you changed, why, and how you verified it.`;
 }

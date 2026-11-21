@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { Noticed, Repo, Run, RunEvent, Ticket, PermissionRequest } from "../core/types";
+import { isRunnerTicket } from "../core/scouts";
+import type { Decision, Noticed, Repo, Run, RunEvent, Ticket, PermissionRequest } from "../core/types";
 import { Markdown } from "./markdown";
 
 // ------------------------------------------------------------------- api
@@ -88,9 +89,13 @@ function useHub(onMessage: (m: HubMessage) => void, enabled: boolean) {
 
 // ------------------------------------------------------------------- app
 
-const COLUMNS: { key: Ticket["status"]; label: string; collapsed?: boolean }[] = [
+type RankedDecision = Decision & { held: number; held_tickets: Ticket[] };
+type ScoutTypeInfo = { id: string; title: string };
+
+const COLUMNS: { key: Ticket["status"]; label: string; collapsed?: boolean; hideEmpty?: boolean }[] = [
   { key: "review", label: "Review" },
   { key: "in_progress", label: "In progress" },
+  { key: "proposed", label: "Proposed by scouts", hideEmpty: true },
   { key: "todo", label: "Todo" },
   { key: "done", label: "Done" },
   { key: "cancelled", label: "Cancelled", collapsed: true },
@@ -110,6 +115,16 @@ function App() {
   const [needsToken, setNeedsToken] = useState(!token);
   const [noticed, setNoticed] = useState<Noticed[]>([]);
   const loadNoticed = useCallback(() => api<Noticed[]>("/api/noticed").then(setNoticed).catch(() => {}), []);
+  const [openDecisions, setOpenDecisions] = useState<RankedDecision[]>([]);
+  const [decided, setDecided] = useState<Decision[]>([]);
+  const [scoutTypes, setScoutTypes] = useState<ScoutTypeInfo[]>([]);
+  const loadDecisions = useCallback(
+    () =>
+      Promise.all([api<RankedDecision[]>("/api/decisions"), api<Decision[]>("/api/decisions?status=decided")])
+        .then(([o, d]) => (setOpenDecisions(o), setDecided(d)))
+        .catch(() => {}),
+    [],
+  );
   const [pending, setPending] = useState<Map<string, number>>(new Map());
   const eventSink = useRef<((e: RunEvent) => void) | null>(null);
 
@@ -121,8 +136,9 @@ function App() {
     setSandbox(s.sandbox);
     setSandboxReason(s.sandboxReason);
     setPending(new Map((s.permissions ?? []).map((p: { runId: number; req: PermissionRequest }) => [p.req.id, p.runId])));
-    await loadNoticed();
-  }, [loadNoticed]);
+    setScoutTypes(s.scoutTypes ?? []);
+    await Promise.all([loadNoticed(), loadDecisions()]);
+  }, [loadNoticed, loadDecisions]);
 
   useEffect(() => {
     if (!token) return; // nothing to ask with; the sign-in screen is already showing
@@ -152,6 +168,7 @@ function App() {
     else if (m.type === "event") {
       const e = m.event;
       if (e.kind === "noticed") loadNoticed();
+      if (e.kind.startsWith("scout.")) loadDecisions();
       if (e.kind === "permission.request") setPending((p) => new Map(p).set((e.data as any).id, e.run_id));
       else if (e.kind === "permission.decision") {
         setPending((p) => {
@@ -246,10 +263,30 @@ function App() {
           onDismiss={(id) => act(async () => (await api(`/api/noticed/${id}/dismiss`, "POST"), await loadNoticed()))}
           onOpenRun={(id) => setSelected(id)}
         />
+        <DecisionsPanel
+          open={openDecisions}
+          decided={decided}
+          onDecide={(id, body) => act(async () => (await api(`/api/decisions/${id}/decide`, "POST", body), await loadDecisions()))}
+          onWithdraw={(id) => act(async () => (await api(`/api/decisions/${id}/withdraw`, "POST"), await loadDecisions()))}
+        />
+        <ScoutsPanel
+          repos={repos}
+          types={scoutTypes}
+          runs={[...runs.values()]}
+          selected={selected}
+          onStart={(repo, type) =>
+            act(async () => {
+              const run = await api<Run>(`/api/repos/${encodeURIComponent(repo)}/scouts/${type}`, "POST");
+              setRuns((prev) => new Map(prev).set(run.id, run));
+              setSelected(run.id);
+            })
+          }
+          onOpenRun={(id) => setSelected(id)}
+        />
         <RepoNotes repos={repos} onSaved={(r) => setRepos((prev) => prev.map((x) => (x.name === r.name ? r : x)))} onError={setError} />
         {COLUMNS.map((col) => {
-          const items = [...tickets.values()].filter((t) => t.status === col.key).sort((a, b) => b.id - a.id);
-          if (col.collapsed && items.length === 0) return null;
+          const items = [...tickets.values()].filter((t) => t.status === col.key && !isRunnerTicket(t)).sort((a, b) => b.id - a.id);
+          if ((col.collapsed || col.hideEmpty) && items.length === 0) return null;
           const cards = items.map((t) => {
                 const r = latestRun.get(t.id);
                 return (
@@ -261,11 +298,28 @@ function App() {
                     <div className="t">
                       #{t.id} {t.title}
                     </div>
+                    {t.source.startsWith("scout:") && (t.status === "proposed" || t.status === "todo") && (
+                      <details className="ticketbody" onClick={(e) => e.stopPropagation()}>
+                        <summary>Why the scout filed it</summary>
+                        <Markdown text={t.body} />
+                      </details>
+                    )}
                     <div className="meta">
                       <span>{t.repo}</span>
                       {r && <span className={`chip ${r.state}`}>{stateLabel(r, queuePos)}</span>}
                       {r && pendingRuns.has(r.id) && <span className="chip needs">needs you</span>}
+                      {t.confidence && <span className={`chip conf-${t.confidence}`} title={`Filed by ${t.source}`}>{t.confidence}</span>}
                       <span style={{ flex: 1 }} />
+                      {t.status === "proposed" && (
+                        <>
+                          <button className="btn sm primary" onClick={(e) => (e.stopPropagation(), act(() => api(`/api/tickets/${t.id}/accept`, "POST")))}>
+                            Accept
+                          </button>
+                          <button className="btn sm" onClick={(e) => (e.stopPropagation(), act(() => api(`/api/tickets/${t.id}/reject`, "POST")))}>
+                            Reject
+                          </button>
+                        </>
+                      )}
                       {t.status === "todo" && (
                         <button
                           className="btn sm primary"
@@ -421,6 +475,178 @@ function readPng(file: Blob): Promise<string> {
 }
 
 // ------------------------------------------------------------------- run view
+
+/**
+ * The decision register: open questions from scouts, the ones holding the most work first. The
+ * operator writes the decision (it goes into every worker's prompt) and keeps or drops held tickets.
+ */
+function DecisionsPanel({
+  open,
+  decided,
+  onDecide,
+  onWithdraw,
+}: {
+  open: RankedDecision[];
+  decided: Decision[];
+  onDecide: (id: number, body: { decision: string; version: number; keep: number[]; drop: number[] }) => void;
+  onWithdraw: (id: number) => void;
+}) {
+  if (!open.length && !decided.length) return null;
+  return (
+    <details className="col decisions" open={open.length > 0}>
+      <summary>
+        <h2 title="Questions only you can answer. Your answer becomes a decision every worker follows.">
+          Decisions · {open.length} open
+        </h2>
+      </summary>
+      {open.map((d) => (
+        <DecisionCard key={`${d.id}-${d.version}`} d={d} onDecide={onDecide} onWithdraw={onWithdraw} />
+      ))}
+      {decided.length > 0 && (
+        <details className="decided">
+          <summary className="muted">Decided · {decided.length}</summary>
+          {decided.map((d) => (
+            <div className="card decision-done" key={d.id}>
+              {d.question && <div className="muted">#{d.id} {d.question}</div>}
+              <div>{d.decision}</div>
+            </div>
+          ))}
+        </details>
+      )}
+    </details>
+  );
+}
+
+function DecisionCard({
+  d,
+  onDecide,
+  onWithdraw,
+}: {
+  d: RankedDecision;
+  onDecide: (id: number, body: { decision: string; version: number; keep: number[]; drop: number[] }) => void;
+  onWithdraw: (id: number) => void;
+}) {
+  const [text, setText] = useState("");
+  const [keep, setKeep] = useState<Set<number>>(() => new Set(d.held_tickets.map((t) => t.id)));
+  const options = d.options.split("\n").map((o) => o.trim()).filter(Boolean);
+  return (
+    <div className="card decision-item">
+      <div className="row">
+        <span className="chip">{d.area}</span>
+        {d.held > 0 && <span className="chip needs">holds {d.held}</span>}
+        <span className="muted">asked by {d.asked_by}</span>
+      </div>
+      <div className="title">{d.question}</div>
+      {d.context && (
+        <details>
+          <summary className="muted">Context (from the scout)</summary>
+          <div className="detail">{d.context}</div>
+        </details>
+      )}
+      {options.length > 0 && (
+        <div className="row wrap">
+          {options.map((o) => (
+            <button key={o} className="btn sm" title="Start your decision from this suggestion" onClick={() => setText(o)}>
+              {o.length > 60 ? `${o.slice(0, 60)}…` : o}
+            </button>
+          ))}
+        </div>
+      )}
+      {d.held_tickets.length > 0 && (
+        <div className="held">
+          <div className="muted">Tickets waiting on this (checked go to todo, unchecked are dropped):</div>
+          {d.held_tickets.map((t) => (
+            <label key={t.id} className="row">
+              <input
+                type="checkbox"
+                checked={keep.has(t.id)}
+                onChange={(e) =>
+                  setKeep((prev) => {
+                    const n = new Set(prev);
+                    e.target.checked ? n.add(t.id) : n.delete(t.id);
+                    return n;
+                  })
+                }
+              />
+              #{t.id} {t.title}
+            </label>
+          ))}
+        </div>
+      )}
+      <textarea
+        placeholder="Your decision, written to stand alone (e.g. 'Support phones from 390px wide.'); workers follow it"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={2}
+      />
+      <div className="row">
+        <button className="btn primary" disabled={!text.trim()} onClick={() =>
+            onDecide(d.id, {
+              decision: text.trim(),
+              version: d.version,
+              keep: [...keep],
+              drop: d.held_tickets.map((t) => t.id).filter((id) => !keep.has(id)),
+            })
+          }>
+          Decide
+        </button>
+        <button className="btn" onClick={() => onWithdraw(d.id)} title="Drop the question; held tickets go back to Proposed">
+          Withdraw
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Start a scout on a repo; shows each scout's latest run. */
+function ScoutsPanel({
+  repos,
+  types,
+  runs,
+  selected,
+  onStart,
+  onOpenRun,
+}: {
+  repos: Repo[];
+  types: ScoutTypeInfo[];
+  runs: Run[];
+  selected: number | null;
+  onStart: (repo: string, type: string) => void;
+  onOpenRun: (runId: number) => void;
+}) {
+  if (!repos.length || !types.length) return null;
+  const live = ["queued", "preparing", "running", "paused", "verifying"];
+  return (
+    <details className="col scouts">
+      <summary>
+        <h2 title="Scouts look through a repo in one area and file tickets and questions. They land nothing.">Scouts</h2>
+      </summary>
+      {repos.map((repo) => (
+        <div className="card scout-repo" key={repo.name}>
+          <div className="title">{repo.name}</div>
+          {types.map((t) => {
+            const last = runs.filter((r) => r.kind === "scout" && r.scout === t.id && r.repo === repo.name).sort((a, b) => b.id - a.id)[0];
+            const running = last && live.includes(last.state);
+            return (
+              <div className="row" key={t.id}>
+                <span style={{ minWidth: 100 }}>{t.title}</span>
+                {last && (
+                  <a href={`#run-${last.id}`} className={last.id === selected ? "sel" : ""} onClick={() => onOpenRun(last.id)}>
+                    <span className={`chip ${last.state}`}>{last.state.replace("_", " ")}</span> ≈${last.cost_usd.toFixed(2)}
+                  </a>
+                )}
+                <span style={{ flex: 1 }} />
+                <button className="btn sm" disabled={running} onClick={() => onStart(repo.name, t.id)}>
+                  {running ? "Running" : "Run"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </details>
+  );
+}
 
 /** Problems workers noticed outside their tickets: the operator makes a ticket or dismisses each. */
 function NoticedPanel({
@@ -831,6 +1057,14 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
           <Shot runId={runId} name={d.name} caption={d.caption} />
         </div>
       );
+    case "scout.ticket":
+      return (
+        <div className="ev log">
+          filed ticket #{d.id} [{d.status}, {d.confidence}] {d.title}
+        </div>
+      );
+    case "scout.decision":
+      return <div className="ev log">asked decision #{d.id}: {d.question}</div>;
     case "noticed":
       return (
         <div className="ev log">
