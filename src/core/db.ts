@@ -134,13 +134,20 @@ export class Store {
   }
 
   // ---- noticed (no foreign key to runs: reports outlive a discarded run)
-  /** Add a report, or merge it into an open one with the same normalised title in the repo. */
-  addNoticed(n: { repo: string; runId: number; kind: NoticedKind; title: string; detail: string; evidence: string }): { noticed: Noticed; merged: boolean } {
+  /**
+   * Add a report, or count it against the latest one with the same normalised title in the repo,
+   * whatever its status (a dismissed or ticketed problem is still known), unless `resolved` says
+   * that one is settled (e.g. its ticket is done), in which case the problem is back: a new report.
+   */
+  addNoticed(
+    n: { repo: string; runId: number; kind: NoticedKind; title: string; detail: string; evidence: string },
+    resolved: (existing: Noticed) => boolean = () => false,
+  ): { noticed: Noticed; merged: boolean } {
     const key = n.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
     const open = this.db
-      .query<Noticed, [string, string]>("SELECT * FROM noticed WHERE repo = ? AND title_key = ? AND status = 'open'")
+      .query<Noticed, [string, string]>("SELECT * FROM noticed WHERE repo = ? AND title_key = ? ORDER BY id DESC LIMIT 1")
       .get(n.repo, key);
-    if (open) {
+    if (open && !resolved(open)) {
       const runs = new Set(open.run_ids.split(",").filter(Boolean));
       runs.add(String(n.runId));
       this.db
@@ -168,6 +175,14 @@ export class Store {
       .query("UPDATE noticed SET status = ?, ticket_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
       .run(patch.status, patch.ticket_id ?? null, id);
     return this.getNoticed(id)!;
+  }
+
+  /** The data of a run's latest event of one kind (one query, not the whole log). */
+  lastEventData(runId: number, kind: string): Record<string, unknown> | null {
+    const row = this.db
+      .query<{ data: string }, [number, string]>("SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY id DESC LIMIT 1")
+      .get(runId, kind);
+    return row ? JSON.parse(row.data) : null;
   }
 
   // ---- events

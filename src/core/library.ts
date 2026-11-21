@@ -45,7 +45,15 @@ export interface RunSummary {
 
 /** Split markdown into chunks at headings (outside code fences), each at most ~CHUNK_CHARS. */
 export function chunkText(text: string, markdown: boolean): Chunk[] {
-  const lines = text.split("\n");
+  // One long line (a wide table, a data URI) would otherwise be a chunk of any size: split it.
+  const lines: string[] = [];
+  const lineNo: number[] = [];
+  text.split("\n").forEach((l, i) => {
+    for (let at = 0; at === 0 || at < l.length; at += CHUNK_CHARS) {
+      lines.push(l.slice(at, at + CHUNK_CHARS));
+      lineNo.push(i + 1);
+    }
+  });
   const chunks: Chunk[] = [];
   const stack: string[] = [];
   let buf: string[] = [];
@@ -63,16 +71,16 @@ export function chunkText(text: string, markdown: boolean): Chunk[] {
     if (markdown && /^\s*(```|~~~)/.test(line)) fence = !fence;
     const h = markdown && !fence ? line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/) : null;
     if (h) {
-      flush(i + 1);
+      flush(lineNo[i]!);
       stack.length = h[1]!.length - 1;
-      stack.push(h[2]!);
+      stack.push(h[2]!.slice(0, 200));
     } else if (size + line.length > CHUNK_CHARS && size > 0) {
-      flush(i + 1);
+      flush(lineNo[i]!);
     }
     buf.push(line);
     size += line.length + 1;
   });
-  flush(lines.length + 1);
+  flush((lineNo.at(-1) ?? 0) + 1);
   return chunks;
 }
 
@@ -174,13 +182,22 @@ export class Library {
     }
   }
 
-  /** Replace the repo's run summaries (they change as runs land; cheap to rewrite per search). */
-  setRunSummaries(repo: string, runs: RunSummary[]) {
+  /** Run ids whose summaries are already in the library for a repo. */
+  summarizedRuns(repo: string): Set<number> {
+    return new Set(
+      this.db
+        .query<{ ref: string }, [string]>("SELECT ref FROM library WHERE repo = ? AND kind = 'run'")
+        .all(repo)
+        .map((r) => Number(r.ref.slice(4))),
+    );
+  }
+
+  /** Add summaries of newly landed runs. Existing ones stay, so ids from earlier searches still open. */
+  addRunSummaries(repo: string, runs: RunSummary[]) {
     const insert = this.db.query(
       "INSERT INTO library (heading, body, repo, commit_id, kind, ref, line) VALUES (?, ?, ?, '', 'run', ?, 0)",
     );
     this.db.transaction(() => {
-      this.db.query("DELETE FROM library WHERE repo = ? AND kind = 'run'").run(repo);
       for (const r of runs) insert.run(r.title, r.body, repo, `run ${r.runId}`);
     })();
   }

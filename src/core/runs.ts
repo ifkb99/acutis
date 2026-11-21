@@ -333,22 +333,23 @@ export class RunManager {
     }
   }
 
-  /** What landed runs did, for the library: ticket text plus the worker's final report. */
-  private runSummaries(repo: string): RunSummary[] {
-    return this.deps.store
+  /** Add newly landed runs to the library: ticket text plus the worker's final report. */
+  private refreshRunSummaries(repo: string) {
+    const have = this.library.summarizedRuns(repo);
+    const fresh: RunSummary[] = this.deps.store
       .listRuns(1000)
-      .filter((r) => r.repo === repo && r.state === "done")
+      .filter((r) => r.repo === repo && r.state === "done" && !have.has(r.id))
       .slice(0, 50)
       .map((r) => {
         const ticket = this.deps.tickets.get(r.ticket_id);
-        const result = this.deps.store.events(r.id).filter((e) => e.kind === "agent.result").at(-1);
-        const report = String((result?.data as any)?.result ?? "").trim();
+        const report = String(this.deps.store.lastEventData(r.id, "agent.result")?.result ?? "").trim();
         return {
           runId: r.id,
           title: `Run ${r.id}: ${ticket?.title ?? "(ticket gone)"}`,
           body: clip(`${ticket?.body ?? ""}\n\nThe worker's final report:\n${report || "(none)"}`, 4000),
         };
       });
+    if (fresh.length) this.library.addRunSummaries(repo, fresh);
   }
 
   // ---------------------------------------------------------------- noticed
@@ -757,7 +758,7 @@ export class RunManager {
           const x = a();
           const query = clip(args.query, 300);
           if (!query) return { text: "query is empty", isError: true };
-          this.library.setRunSummaries(x.repo.name, this.runSummaries(x.repo.name));
+          this.refreshRunSummaries(x.repo.name);
           let commit: string | null = x.ws.baseCommit;
           let note = "";
           if (!this.library.isIndexed(x.repo.name, commit)) {
@@ -787,7 +788,7 @@ export class RunManager {
           const e = this.library.read(x.repo.name, String(args.id ?? ""));
           if (!e) return { text: `No library entry ${JSON.stringify(args.id)} for this repo.`, isError: true };
           const where = e.kind === "doc" ? `${e.ref}:${e.line}` : `${e.ref} (landed; written by its worker)`;
-          return { text: `[${String(args.id).trim()}] ${where}${e.heading ? ` · ${e.heading}` : ""}\n\n${e.body}` };
+          return { text: `[${String(args.id).trim()}] ${where}${e.heading ? ` · ${e.heading}` : ""}\n\n${clip(e.body, 4000)}` };
         },
       },
     ];
@@ -807,27 +808,29 @@ export class RunManager {
       },
       handler: async (args): Promise<ToolOutput> => {
         const x = a();
-        const title = clip(args.title, 200);
+        // One line: it becomes a ticket title, and from there the first line of a landing commit.
+        const title = clip(String(args.title ?? "").replace(/\s+/g, " "), 200);
         if (!title) return { text: "title is empty", isError: true };
         if (x.noticedCount >= MAX_NOTICED_PER_RUN) {
           return { text: `This run already filed ${MAX_NOTICED_PER_RUN} reports; mention anything else in your final summary.`, isError: true };
         }
         x.noticedCount++;
         const kind = (NOTICED_KINDS as string[]).includes(String(args.kind)) ? (args.kind as NoticedKind) : "other";
-        const { noticed, merged } = this.deps.store.addNoticed({
-          repo: x.repo.name,
-          runId,
-          kind,
-          title,
-          detail: clip(args.detail, 4000),
-          evidence: clip(args.evidence, 4000),
-        });
-        this.deps.hub.emit(runId, "noticed", { id: noticed.id, kind, title: noticed.title, merged, count: noticed.count });
-        return {
-          text: merged
-            ? `Merged into noticed #${noticed.id}, which ${noticed.count} reports now share. Don't fix it as part of this ticket.`
-            : `Recorded as noticed #${noticed.id}. Don't fix it as part of this ticket.`,
-        };
+        const { noticed, merged } = this.deps.store.addNoticed(
+          { repo: x.repo.name, runId, kind, title, detail: clip(args.detail, 4000), evidence: clip(args.evidence, 4000) },
+          // A ticketed problem whose ticket is done has come back: that's a new report.
+          (n) => n.status === "ticketed" && n.ticket_id !== null && this.deps.tickets.get(n.ticket_id)?.status === "done",
+        );
+        this.deps.hub.emit(runId, "noticed", { id: noticed.id, kind, title: noticed.title, merged, count: noticed.count, status: noticed.status });
+        const known =
+          noticed.status === "dismissed"
+            ? `The operator already looked at this and dismissed it (noticed #${noticed.id}); your report was counted.`
+            : noticed.status === "ticketed"
+              ? `This is already ticket #${noticed.ticket_id} (from noticed #${noticed.id}); your report was counted.`
+              : merged
+                ? `Merged into noticed #${noticed.id}, which ${noticed.count} reports now share.`
+                : `Recorded as noticed #${noticed.id}.`;
+        return { text: `${known} Don't fix it as part of this ticket.` };
       },
     };
   }

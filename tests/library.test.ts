@@ -26,6 +26,23 @@ describe("library units", () => {
     expect(chunks.every((c) => c.heading === "Big")).toBe(true);
   });
 
+  test("one very long line (a wide table, a data URI) is split, so no chunk is unbounded", () => {
+    const chunks = chunkText(`# Data\n${"y".repeat(50_000)}\nafter`, true);
+    expect(Math.max(...chunks.map((c) => c.body.length))).toBeLessThanOrEqual(2000);
+    expect(chunks.map((c) => c.body).join("").replace(/\s|# Data|after/g, "").length).toBe(50_000);
+    expect(chunks.filter((c) => c.line === 2).length).toBeGreaterThan(20); // the pieces keep their source line
+    expect(chunks.at(-1)!.line).toBe(3);
+  });
+
+  test("library globs parse from the workflow; each list replaces its default", async () => {
+    const { parseWorkflow } = await import("../src/core/workflow");
+    expect(parseWorkflow("---\nlibrary:\n  include: [\"wiki/**/*.md\"]\n---\n", "t").library).toEqual({
+      include: ["wiki/**/*.md"],
+      exclude: ["**/node_modules/**", "**/vendor/**", ".acutis/**"],
+    });
+    expect(() => parseWorkflow("---\nlibrary: [1]\n---\n", "t")).toThrow(/library/);
+  });
+
   test("queries become quoted words, so FTS operators in the input can't break or widen the search", () => {
     expect(ftsQuery('auth* OR "x" NEAR(a b) -token')).toBe('"auth" OR "or" OR "near" OR "token"');
     expect(ftsQuery("!!")).toBeNull();
@@ -124,6 +141,40 @@ describe("library and noticed in runs", () => {
     expect(found).toContain(`run ${r1.id} (landed; summary written by its worker) · Run ${r1.id}: Cache tuning`);
   });
 
+  test("run summary ids stay valid after another run lands", async () => {
+    const outs: string[] = [];
+    let opened = "";
+    const lands = (text: string): FakeScript => async (c) => {
+      writeFileSync(join(c.spec.cwd, `${text.length}.txt`), "x\n");
+      finalReport(c, text);
+      await c.nextMessage();
+    };
+    let firstId = "";
+    const searchesTwice: FakeScript = async (c) => {
+      outs.push((await tool(c, "search_project").handler({ query: "cache" })).text);
+      firstId = /\[(L\d+)\] run/.exec(outs[0]!)?.[1] ?? "";
+      await c.nextMessage(); // the operator lands another run meanwhile, then messages
+      outs.push((await tool(c, "search_project").handler({ query: "cache" })).text);
+      opened = (await tool(c, "read_project_entry").handler({ id: firstId })).text;
+      c.result();
+      await c.nextMessage();
+    };
+    const { app, ticket } = await setup([lands("Cache A: added an LRU cache."), searchesTwice, lands("Cache B: tuned the cache size.")], { "README.md": "# Demo\n" });
+    const r1 = await app.runs.start(ticket("A").id);
+    await waitFor(() => app.store.getRun(r1.id)!.state === "awaiting_review", 10000);
+    await app.runs.approve(r1.id);
+    const r2 = await app.runs.start(ticket("searcher").id);
+    await waitFor(() => outs.length === 1, 10000);
+    const r3 = await app.runs.start(ticket("B").id);
+    await waitFor(() => app.store.getRun(r3.id)!.state === "awaiting_review", 10000);
+    await app.runs.approve(r3.id);
+    await app.runs.message(r2.id, "go on");
+    await waitFor(() => opened !== "", 10000);
+    expect(outs[1]).toContain(`run ${r3.id}`);
+    expect(opened).toContain(`run ${r1.id}`);
+    expect(opened).toContain("Cache A: added an LRU cache.");
+  });
+
   test("an indexing failure warns but never fails the run", async () => {
     let tools: string[] = [];
     const script: FakeScript = async (c) => {
@@ -191,6 +242,40 @@ describe("library and noticed in runs", () => {
     expect(() => app.runs.ticketFromNoticed(clippy.id)).toThrow(/already ticketed/);
     const other = open.find((n) => n.title === "other 0")!;
     expect(app.runs.dismissNoticed(other.id).status).toBe("dismissed");
+  });
+
+  test("a problem the operator dismissed or ticketed isn't reopened by the next report, unless its ticket is done", async () => {
+    const replies: string[] = [];
+    const reports = (n: number): FakeScript => async (c) => {
+      for (let i = 0; i < n; i++) {
+        await c.nextMessage();
+        replies.push((await tool(c, "report_noticed").handler({ title: i % 2 ? "Clippy\nfails on base" : "Clippy fails on base", detail: "d" })).text);
+      }
+      c.result();
+      await c.nextMessage();
+    };
+    const { app, ticket } = await setup([reports(4)], { "README.md": "# Demo\n" });
+    const run = await app.runs.start(ticket("t").id);
+    await waitFor(() => app.store.getRun(run.id)!.state === "running", 10000);
+    const say = async (n: number) => (await app.runs.message(run.id, "next"), await waitFor(() => replies.length === n, 5000));
+
+    await say(1);
+    const first = app.runs.listNoticed("open")[0]!;
+    app.runs.dismissNoticed(first.id);
+    await say(2); // same problem (the title's newline is folded), already dismissed
+    expect(replies[1]).toContain("already looked at this and dismissed it");
+    expect(app.runs.listNoticed("open")).toEqual([]);
+    expect(app.store.getNoticed(first.id)).toMatchObject({ status: "dismissed", count: 2, title: "Clippy fails on base" });
+
+    // A ticketed one counts too, until its ticket is done; then the problem is back.
+    app.store.updateNoticed(first.id, { status: "open" });
+    const t = app.runs.ticketFromNoticed(first.id);
+    await say(3);
+    expect(replies[2]).toContain(`already ticket #${t.id}`);
+    app.tickets.setStatus(t.id, "done");
+    await say(4);
+    expect(replies[3]).toContain("Recorded as noticed");
+    expect(app.runs.listNoticed("open").length).toBe(1);
   });
 
   test("the noticed API lists, tickets and dismisses (with the token)", async () => {

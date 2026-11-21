@@ -247,7 +247,7 @@ There are two separate questions: where the agent loop runs, and where the app r
   from the fresh workspace *before* setup steps run, so neither setup output nor the worker's edits
   get in. Only plain files whose real path is inside the workspace are read (a tracked symlink to
   `~/.ssh` or the API token would otherwise be served by a tool that runs outside the sandbox),
-  up to 256 KB, not binary. Markdown is chunked by heading (about 2,000 characters max) and keeps its start line.
+  up to 256 KB, not binary. Markdown is chunked by heading, at most 2,000 characters (over-long lines are split), and keeps its start line.
   `library:` in the workflow sets the include/exclude globs, or `false` turns it off. Indexed
   commits that no live run uses are pruned. Indexing failure warns and never fails the run.
 - **What else is in it.** The ticket and final report of landed runs, labelled as worker-written.
@@ -256,11 +256,14 @@ There are two separate questions: where the agent loop runs, and where the app r
 - **Tools.** `search_project` returns at most 10 excerpts within about 6,000 characters, with `path:line`.
   `read_project_entry` opens one. Probe on a copy of stahl (38 docs, 757 sections): the worker
   searched unprompted, once; the result was 2,818 characters and pointed it at the two wiki pages it
-  then read. Docs were about 20k characters of its reading against 46k of code, so index-time summaries
-  (phase 1b) wait.
+  then read whole with `cat` (never `read_project_entry`). Docs were about 45k characters of its
+  reading against about 89k of code and other output. That meets phase 1b's trigger ("search alone leaves workers
+  reading whole files"), but one run with no control can't show whether summaries would cut it:
+  1b is undecided.
 - **Noticed reports.** `report_noticed` records a problem outside the ticket (title, detail,
   evidence, kind), capped at 10 per run. Reports with the same normalised title in a repo merge and
-  count. They outlive their run. The operator dismisses one or makes a ticket of it (dashboard
+  count, whatever the earlier one's status: a dismissed or ticketed problem isn't reopened by the next
+  worker, unless its ticket is done. They outlive their run. The operator dismisses one or makes a ticket of it (dashboard
   panel, `acutis noticed`), and the ticket says the text is worker-written and unchecked, since it
   becomes a future worker's prompt. The probe's worker filed a real-looking bug: `VehicleDef` has no
   `deny_unknown_fields`, so `validate-mods` accepts misspelt fields.
