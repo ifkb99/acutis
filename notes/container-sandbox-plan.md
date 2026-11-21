@@ -1,6 +1,6 @@
 # Plan: container backend for gates and previews (draft, 2026-11-21)
 
-Status: **proposal, for review.** Nothing here is built yet.
+Status: **benched (2026-11-21).** A proposal; nothing here is built. Hiding `/run` is the stopgap meanwhile.
 
 ## Why
 - **Unix sockets escape bubblewrap.** A network namespace doesn't cover path sockets, and a
