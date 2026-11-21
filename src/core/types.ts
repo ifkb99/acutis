@@ -7,6 +7,8 @@ export interface Repo {
   path: string;
   /** jj revset naming the trunk to branch from, e.g. "main". */
   base: string;
+  /** Operator guidance for workers on this repo. Lives in Acutis's DB, outside any worker's reach. */
+  notes: string;
   created_at: string;
 }
 
@@ -91,8 +93,17 @@ export interface WorkspaceProvider {
   create(repo: Repo, name: string, baseCommit: string): Promise<Workspace>;
   diff(repo: Repo, ws: Workspace): Promise<string>;
   changedFiles(repo: Repo, ws: Workspace): Promise<string[]>;
-  /** Describe the workspace's change and point a bookmark at it. */
-  land(repo: Repo, ws: Workspace, opts: { message: string; bookmark: string; push: boolean }): Promise<void>;
+  /** Describe the workspace's change and, if given, point a bookmark at it (and push it). */
+  land(repo: Repo, ws: Workspace, opts: { message: string; bookmark: string | null; push: boolean }): Promise<void>;
+  /**
+   * Rebase the workspace's change onto the current trunk commit. Returns the files left in
+   * conflict (empty on success) and whether the change actually moved.
+   */
+  rebase(repo: Repo, ws: Workspace, onto: string): Promise<{ moved: boolean; conflicts: string[] }>;
+  /** Move a trunk bookmark forward to the workspace's change. Fails if that isn't a fast-forward. */
+  advance(repo: Repo, ws: Workspace, bookmark: string): Promise<void>;
+  /** True if `name` is a local bookmark in the repo. */
+  isBookmark(repo: Repo, name: string): Promise<boolean>;
   /** Forget the workspace and delete its directory. Keeps the change unless abandon=true. */
   destroy(repo: Repo, ws: Workspace, opts: { abandon: boolean }): Promise<void>;
 }
@@ -121,12 +132,32 @@ export interface PermissionRequest {
   tool: string;
   input: Record<string, unknown>;
   blockedPath?: string;
+  /** Why the runner asked (e.g. "names paths outside the workspace: /tmp/x"). */
+  reason?: string;
   canAlwaysAllow: boolean;
 }
 
 export type PermissionDecision =
   | { behavior: "allow"; always?: boolean }
   | { behavior: "deny"; message?: string };
+
+/** What a factory-owned tool returns to the agent. */
+export interface ToolOutput {
+  text: string;
+  images?: { data: string; mimeType: string }[];
+  isError?: boolean;
+}
+
+/**
+ * A tool Acutis gives the worker (served in-process, never an external MCP server).
+ * Parameters are flat and string/number only so any runner can expose them.
+ */
+export interface AcutisTool {
+  name: string;
+  description: string;
+  params: Record<string, { type: "string" | "number"; description: string; optional?: boolean }>;
+  handler: (args: Record<string, string | number | undefined>) => Promise<ToolOutput>;
+}
 
 export interface AgentSpec {
   cwd: string;
@@ -137,6 +168,8 @@ export interface AgentSpec {
   allow: string[];
   deny: string[];
   resumeSessionId?: string;
+  /** Factory-owned tools (preview, browser) offered to the worker. */
+  tools?: AcutisTool[];
   /** Called when a tool call needs a human decision. */
   onPermission: (req: PermissionRequest) => Promise<PermissionDecision>;
 }
@@ -156,22 +189,91 @@ export interface AgentRunner {
   start(spec: AgentSpec): AgentSession;
 }
 
+// ---- Browser ---------------------------------------------------------------
+
+export interface BrowserCheck {
+  /** Absolute URL to open. Requests to any other origin are blocked. */
+  url: string;
+  steps?: string;
+  script?: string;
+  width?: number;
+  height?: number;
+}
+
+export interface BrowserResult {
+  ok: boolean;
+  /** PNG, base64. */
+  screenshot?: string;
+  console: string[];
+  errors: string[];
+  blocked: string[];
+  scriptResult?: string;
+  failure?: string;
+}
+
+export interface BrowserProvider {
+  readonly available: boolean;
+  check(c: BrowserCheck): Promise<BrowserResult>;
+}
+
+/**
+ * Confines commands that execute worker-written code (gates, the preview server) the way the
+ * agent's own Bash is confined: the workspace is the only writable path and Acutis's own data
+ * is hidden. `network: "none"` also gives the command an empty network namespace; the preview
+ * keeps the host network so the checking browser can reach it.
+ */
+export interface CommandSandbox {
+  /** argv that runs `command` (a `sh -c` string) in `cwd`, confined. */
+  wrap(command: string, cwd: string, opts: { network: "none" | "host" }): string[];
+}
+
 // ---- Workflow / policy -------------------------------------------------------
 
-export interface Gate {
+export interface CommandGate {
+  kind: "cmd";
   name: string;
   run: string;
   timeout_s?: number;
 }
 
+/** Load a page of the run's preview in headless Chrome; fails on page errors or a failing script. */
+export interface BrowserGate {
+  kind: "browser";
+  name: string;
+  path: string;
+  /** One action per line: "press ArrowLeft", "click #id", "type text", "wait 200", "waitfor #id". */
+  steps?: string;
+  /** JS expression evaluated in the page after the steps; a falsy result or a throw fails the gate. */
+  script?: string;
+  width?: number;
+  height?: number;
+}
+
+export type Gate = CommandGate | BrowserGate;
+
+/** A dev server Acutis starts for a run (it owns the process, the agent gets a URL). */
+export interface PreviewSpec {
+  /** Shell command; Acutis sets $PORT (and $BUN_PORT) to a free port. */
+  run: string;
+  /** Path to open by default, e.g. "/". */
+  path: string;
+  ready_timeout_s: number;
+}
+
 export interface Workflow {
   model?: string;
   effort?: AgentSpec["effort"];
+  /** Commands run in a fresh workspace before the agent starts (e.g. "bun install"). */
+  setup: CommandGate[];
   gates: Gate[];
+  preview?: PreviewSpec;
   allow: string[];
   deny: string[];
   max_attempts: number;
-  land: "bookmark" | "push";
+  /** Auto-deny a permission request nobody answered within this many seconds (unset: wait forever). */
+  permission_timeout_s?: number;
+  /** bookmark: set acutis/<id>-<slug>. push: also push it. trunk: rebase onto trunk, re-check, advance trunk. */
+  land: "bookmark" | "push" | "trunk";
   template: string;
   /** Where the workflow came from, for display. */
   source: string;

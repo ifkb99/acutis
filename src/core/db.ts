@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS repos (
   name TEXT PRIMARY KEY,
   path TEXT NOT NULL UNIQUE,
   base TEXT NOT NULL,
+  notes TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE TABLE IF NOT EXISTS tickets (
@@ -58,6 +59,14 @@ export class Store {
     this.db = new Database(path, { create: true, strict: true });
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** CREATE TABLE IF NOT EXISTS never adds columns, so add the ones newer code expects. */
+  private migrate() {
+    const has = (table: string, col: string) =>
+      this.db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+    if (!has("repos", "notes")) this.db.exec("ALTER TABLE repos ADD COLUMN notes TEXT NOT NULL DEFAULT ''");
   }
 
   // ---- repos
@@ -72,6 +81,10 @@ export class Store {
   }
   listRepos(): Repo[] {
     return this.db.query<Repo, []>("SELECT * FROM repos ORDER BY name").all();
+  }
+  setRepoNotes(name: string, notes: string): Repo {
+    this.db.query("UPDATE repos SET notes = ? WHERE name = ?").run(notes, name);
+    return this.getRepo(name)!;
   }
 
   // ---- runs

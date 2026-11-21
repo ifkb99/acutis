@@ -30,7 +30,8 @@ export interface FakeControls {
   /** Resolves when interrupt() is called. */
   interrupted(): Promise<void>;
   closed: boolean;
-  result(subtype?: string): void;
+  /** End the turn. `cost` is the session's running total, like the real SDK reports. */
+  result(subtype?: string, cost?: number): void;
 }
 
 export type FakeScript = (c: FakeControls) => Promise<void>;
@@ -71,8 +72,8 @@ class FakeSession implements AgentSession {
       get closed() {
         return self.closed;
       },
-      result: (subtype = "success") =>
-        this.push({ kind: "agent.result", subtype, result: "", is_error: subtype !== "success", cost_usd: 0.01, turns: 1, duration_ms: 5 }),
+      result: (subtype = "success", cost = 0.01) =>
+        this.push({ kind: "agent.result", subtype, result: "", is_error: subtype !== "success", cost_usd: cost, turns: 1, duration_ms: 5 }),
     };
     queueMicrotask(async () => {
       this.push({ kind: "agent.init", session_id: spec.resumeSessionId ?? crypto.randomUUID(), model: "fake", sandboxed: false });

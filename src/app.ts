@@ -2,8 +2,10 @@ import { homedir } from "node:os";
 import { Store } from "./core/db";
 import { Hub } from "./core/hub";
 import { RunManager } from "./core/runs";
-import type { AgentRunner } from "./core/types";
+import type { AgentRunner, BrowserProvider, CommandSandbox } from "./core/types";
 import { ClaudeSdkRunner, probeSandbox } from "./providers/agent/claude-sdk";
+import { ChromeBrowser } from "./providers/browser/chrome";
+import { BwrapSandbox } from "./providers/sandbox/bwrap";
 import { LocalTicketSource } from "./providers/tickets/local";
 import { JjWorkspaceProvider } from "./providers/workspace/jj";
 
@@ -19,7 +21,7 @@ export function loadConfig(): Config {
   };
 }
 
-export function createApp(cfg: Config, opts: { runner?: AgentRunner } = {}) {
+export function createApp(cfg: Config, opts: { runner?: AgentRunner; browser?: BrowserProvider; commandSandbox?: CommandSandbox } = {}) {
   const store = new Store(`${cfg.home}/acutis.db`);
   const hub = new Hub(store);
   const tickets = new LocalTicketSource(store);
@@ -27,8 +29,11 @@ export function createApp(cfg: Config, opts: { runner?: AgentRunner } = {}) {
   const sandboxStatus = opts.runner ? { ok: false, reason: "test runner" } : probeSandbox();
   const sandbox = sandboxStatus.ok;
   const runner = opts.runner ?? new ClaudeSdkRunner({ sandbox });
-  const runs = new RunManager({ store, hub, tickets, workspaces, runner });
-  return { cfg, store, hub, tickets, workspaces, runner, runs, sandbox, sandboxStatus };
+  const browser = opts.browser ?? new ChromeBrowser();
+  // Gates and previews run worker-written code: confine them whenever the agent itself is sandboxed.
+  const commandSandbox = opts.commandSandbox ?? (sandbox ? new BwrapSandbox({ hide: [cfg.home] }) : undefined);
+  const runs = new RunManager({ store, hub, tickets, workspaces, runner, browser, artifactsDir: `${cfg.home}/artifacts`, commandSandbox });
+  return { cfg, store, hub, tickets, workspaces, runner, runs, browser, sandbox, sandboxStatus };
 }
 
 export type App = ReturnType<typeof createApp>;

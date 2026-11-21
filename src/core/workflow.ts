@@ -1,4 +1,4 @@
-import type { Gate, Ticket, Workflow } from "./types";
+import type { BrowserGate, CommandGate, Gate, PreviewSpec, Repo, Ticket, Workflow } from "./types";
 
 export const WORKFLOW_PATH = ".acutis/workflow.md";
 
@@ -27,6 +27,22 @@ export const DEFAULT_ALLOW = [
   "Bash(git diff:*)",
   "Bash(git status:*)",
   "Bash(git log:*)",
+  "Bash(git show:*)",
+  "Bash(git ls-files:*)",
+  "Bash(git rev-parse:*)",
+  "Bash(jj file list:*)",
+  "Bash(jj file show:*)",
+  "Bash(pwd)",
+  "Bash(which:*)",
+  "Bash(tree:*)",
+  "Bash(sort:*)",
+  "Bash(uniq:*)",
+  "Bash(diff:*)",
+  "Bash(file:*)",
+  "Bash(stat:*)",
+  "Bash(du:*)",
+  "Bash(bun --version)",
+  "Bash(node --version)",
 ];
 
 /** Things workers must never do, whatever a repo's workflow says. */
@@ -53,6 +69,7 @@ export const HARD_DENY = [
 
 export function defaultWorkflow(): Workflow {
   return {
+    setup: [],
     gates: [],
     allow: [...DEFAULT_ALLOW],
     deny: [...HARD_DENY],
@@ -78,17 +95,54 @@ function asStringArray(v: unknown, field: string): string[] {
   return v;
 }
 
+function parseCommand(g: unknown, field: string, i: number): CommandGate {
+  if (typeof g === "string") return { kind: "cmd", name: g, run: g };
+  if (g && typeof g === "object" && typeof (g as any).run === "string") {
+    const run = (g as any).run as string;
+    return { kind: "cmd", name: (g as any).name ?? run, run, timeout_s: (g as any).timeout_s };
+  }
+  throw new Error(`workflow: ${field} ${i + 1} must be a string or {run: "..."}`);
+}
+
+function parseBrowserGate(g: Record<string, unknown>, i: number): BrowserGate {
+  const b = g.browser as Record<string, unknown>;
+  if (!b || typeof b !== "object") throw new Error(`workflow: gate ${i + 1}: "browser" must be a mapping`);
+  const path = typeof b.path === "string" ? b.path : "/";
+  if (!path.startsWith("/")) throw new Error(`workflow: gate ${i + 1}: browser.path must start with "/"`);
+  const num = (v: unknown) => (typeof v === "number" && v > 0 ? Math.floor(v) : undefined);
+  return {
+    kind: "browser",
+    name: typeof g.name === "string" ? g.name : `browser ${path}`,
+    path,
+    steps: typeof b.steps === "string" ? b.steps : undefined,
+    script: typeof b.script === "string" ? b.script : undefined,
+    width: num(b.width),
+    height: num(b.height),
+  };
+}
+
 function parseGates(v: unknown): Gate[] {
   if (v === undefined) return [];
   if (!Array.isArray(v)) throw new Error('workflow: "gates" must be a list');
-  return v.map((g, i) => {
-    if (typeof g === "string") return { name: g, run: g };
-    if (g && typeof g === "object" && typeof (g as any).run === "string") {
-      const run = (g as any).run as string;
-      return { name: (g as any).name ?? run, run, timeout_s: (g as any).timeout_s };
-    }
-    throw new Error(`workflow: gate ${i + 1} must be a string or {run: "..."}`);
-  });
+  return v.map((g, i) =>
+    g && typeof g === "object" && "browser" in g ? parseBrowserGate(g as Record<string, unknown>, i) : parseCommand(g, "gate", i),
+  );
+}
+
+function parseSetup(v: unknown): CommandGate[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new Error('workflow: "setup" must be a list');
+  return v.map((g, i) => parseCommand(g, "setup step", i));
+}
+
+function parsePreview(v: unknown): PreviewSpec | undefined {
+  if (v === undefined || v === null) return undefined;
+  const p = (typeof v === "string" ? { run: v } : v) as Record<string, unknown>;
+  if (typeof p.run !== "string" || !p.run.trim()) throw new Error('workflow: "preview.run" must be a command');
+  const path = typeof p.path === "string" ? p.path : "/";
+  if (!path.startsWith("/")) throw new Error('workflow: "preview.path" must start with "/"');
+  const t = typeof p.ready_timeout_s === "number" && p.ready_timeout_s > 0 ? p.ready_timeout_s : 30;
+  return { run: p.run, path, ready_timeout_s: t };
 }
 
 /** Parse `.acutis/workflow.md` (YAML front matter + prompt template). */
@@ -98,12 +152,21 @@ export function parseWorkflow(text: string, source: string): Workflow {
   wf.source = source;
   if (typeof meta.model === "string") wf.model = meta.model;
   if (typeof meta.effort === "string") wf.effort = meta.effort as Workflow["effort"];
+  wf.setup = parseSetup(meta.setup);
   wf.gates = parseGates(meta.gates);
+  wf.preview = parsePreview(meta.preview);
+  if (wf.gates.some((g) => g.kind === "browser") && !wf.preview) {
+    throw new Error('workflow: browser gates need a "preview" command to serve the app');
+  }
+  if (typeof meta.permission_timeout_s === "number" && meta.permission_timeout_s > 0) {
+    wf.permission_timeout_s = meta.permission_timeout_s;
+  }
   const perms = (meta.permissions ?? {}) as Record<string, unknown>;
   wf.allow = [...DEFAULT_ALLOW, ...asStringArray(perms.allow, "permissions.allow")];
   wf.deny = [...HARD_DENY, ...asStringArray(perms.deny, "permissions.deny")];
   if (typeof meta.max_attempts === "number") wf.max_attempts = Math.max(1, Math.floor(meta.max_attempts));
-  if (meta.land === "push" || meta.land === "bookmark") wf.land = meta.land;
+  if (meta.land === "push" || meta.land === "bookmark" || meta.land === "trunk") wf.land = meta.land;
+  else if (meta.land !== undefined) throw new Error('workflow: "land" must be bookmark, push or trunk');
   if (body.trim()) wf.template = body.trim();
   return wf;
 }
@@ -118,10 +181,28 @@ export function renderTemplate(template: string, ticket: Ticket): string {
   return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (all, key) => vars[key] ?? all);
 }
 
-export function workerSystemPrompt(opts: { ticket: Ticket; cwd: string; workflow: Workflow }): string {
+export function describeGate(g: Gate): string {
+  return g.kind === "cmd" ? g.run : `browser check of ${g.path}${g.script ? ` (script: ${g.script})` : ""}`;
+}
+
+export function workerSystemPrompt(opts: { ticket: Ticket; cwd: string; workflow: Workflow; repo?: Repo }): string {
   const gates = opts.workflow.gates.length
-    ? opts.workflow.gates.map((g) => `- \`${g.run}\``).join("\n")
+    ? opts.workflow.gates.map((g) => `- \`${describeGate(g)}\``).join("\n")
     : "- (none configured)";
+  const preview = opts.workflow.preview
+    ? `
+
+Seeing your work: Acutis runs this repo's preview server for you (\`${opts.workflow.preview.run}\`), so don't start one yourself.
+- \`mcp__acutis__preview\` starts it if needed and returns its URL and recent logs.
+- \`mcp__acutis__browser\` opens a path of the preview in headless Chrome, runs optional steps (one per line: \`press ArrowLeft\`, \`click #selector\`, \`type text\`, \`wait 200\`, \`waitfor #selector\`) and an optional JS expression, then returns a screenshot, console output and page errors.
+Use them to check UI changes before you finish. Only the preview's own origin is reachable from that browser.`
+    : "";
+  const notes = opts.repo?.notes?.trim()
+    ? `
+
+Operator notes for this repo (from the human operator; follow them):
+${opts.repo.notes.trim()}`
+    : "";
   return `# Acutis worker
 
 You are an Acutis worker assigned to ticket #${opts.ticket.id} in repository "${opts.ticket.repo}".
@@ -137,7 +218,7 @@ Rules:
 
 When you finish, Acutis runs these checks in the workspace:
 ${gates}
-Run them yourself first where you can.
+Run them yourself first where you can.${preview}${notes}
 
 End with a short summary: what you changed, why, and how you verified it.`;
 }

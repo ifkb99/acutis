@@ -69,7 +69,26 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
           sandbox: app.sandbox,
           sandboxReason: app.sandboxStatus.reason ?? null,
           runner: app.runner.name,
+          browser: app.browser.available,
+          permissions: runs.allPendingPermissions(),
         })),
+      },
+      "/api/permissions": { GET: api(() => runs.allPendingPermissions()) },
+      "/api/repos/:name": {
+        GET: api((req) => {
+          const repo = store.getRepo(req.params.name!);
+          if (!repo) throw new RunError("not found", 404);
+          return repo;
+        }),
+      },
+      "/api/repos/:name/notes": {
+        PUT: api(async (req) => {
+          if (!store.getRepo(req.params.name!)) throw new RunError("not found", 404);
+          const b = await body(req);
+          if (typeof b.notes !== "string") throw new RunError("notes must be a string", 400);
+          if (b.notes.length > 20_000) throw new RunError("notes are too long (max 20000 chars)", 413);
+          return store.setRepoNotes(req.params.name!, b.notes);
+        }),
       },
       "/api/tickets": {
         POST: api(async (req) => {
@@ -106,6 +125,28 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
         }),
       },
       "/api/runs/:id/diff": { GET: api(async (req) => new Response(await runs.diff(runId(req)))) },
+      "/api/runs/:id/notes": {
+        POST: api(async (req) => {
+          const b = await body(req);
+          return runs.addNote(runId(req), String(b.text ?? ""), typeof b.image === "string" ? b.image : undefined);
+        }),
+      },
+      "/api/runs/:id/artifacts/:name": {
+        GET: api((req) => {
+          const p = runs.artifactPath(runId(req), req.params.name!);
+          if (!p) throw new RunError("not found", 404);
+          // Fixed type + nosniff: artifacts are images only, never rendered as HTML or SVG.
+          return new Response(Bun.file(p), {
+            headers: {
+              "content-type": "image/png",
+              "x-content-type-options": "nosniff",
+              "content-security-policy": "default-src 'none'",
+              "cache-control": "private, max-age=31536000, immutable",
+            },
+          });
+        }),
+      },
+      "/api/runs/:id/preview": { POST: api((req) => runs.preview(runId(req))) },
       "/api/runs/:id/message": { POST: api(async (req) => runs.message(runId(req), (await body(req)).text ?? "")) },
       "/api/runs/:id/redirect": { POST: api(async (req) => runs.redirect(runId(req), (await body(req)).text ?? "")) },
       "/api/runs/:id/pause": { POST: api((req) => runs.pause(runId(req))) },
