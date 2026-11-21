@@ -39,7 +39,7 @@ Runs
   acutis preview <run>                         Start the run's preview server and print its URL
 
 Env: ACUTIS_HOME (default ~/.local/share/acutis), ACUTIS_PORT (default 7777),
-     ACUTIS_MAX_RUNS (runs active at once, default 3; 0 = no limit; more queue),
+     ACUTIS_MAX_RUNS (runs active at once, default 4; 0 = no limit; more queue),
      ACUTIS_NOTIFY=off (no desktop notifications), ACUTIS_NOTIFY_URL (POST notifications, e.g. ntfy),
      ACUTIS_CHROME (browser for previews/checks)`;
 

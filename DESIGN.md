@@ -123,7 +123,7 @@ A redirect is `interrupt()` followed by a new user message. The SDK ends the
 interrupted response with `error_during_execution`. The run treats that as
 expected while a redirect is pending, not as a failure.
 
-**Run limit (2026-11-21).** At most `ACUTIS_MAX_RUNS` runs (default 3; 0 = no
+**Run limit (2026-11-21).** At most `ACUTIS_MAX_RUNS` runs (default 4; 0 = no
 limit) hold a slot, i.e. are preparing, running, verifying or landing. A new run
 past the limit is `queued` and starts, oldest first, when a run leaves those
 states (review, pause, failure, kill). Slots are counted from the store and freed

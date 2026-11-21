@@ -21,7 +21,7 @@ export function loadConfig(): Config {
   return {
     home: process.env.ACUTIS_HOME ?? `${process.env.XDG_DATA_HOME ?? `${homedir()}/.local/share`}/acutis`,
     port: Number(process.env.ACUTIS_PORT ?? 7777),
-    maxRuns: Math.max(0, Math.floor(Number(process.env.ACUTIS_MAX_RUNS ?? 3)) || 0),
+    maxRuns: Math.max(0, Math.floor(Number(process.env.ACUTIS_MAX_RUNS ?? 4)) || 0),
   };
 }
 

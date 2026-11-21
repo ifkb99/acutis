@@ -160,7 +160,7 @@ where the worker showed my concern was wrong. The other was a default I reversed
      the session D-Bus (`systemd-run --user` runs a process outside the sandbox) and `/var/run/docker.sock` both connected.
      `/run` is now hidden (stopgap); sockets under `$HOME` and elsewhere remain. See `notes/container-sandbox-plan.md`.
   2. **Placeholder files still confuse tree-walking tools** inside the agent's sandbox (`prettier .`). Find a way not to mount them.
-  3. ~~**No concurrency or resource limits**~~ **Run limit done (2026-11-21):** `ACUTIS_MAX_RUNS` (default 3), extra runs queue.
+  3. ~~**No concurrency or resource limits**~~ **Run limit done (2026-11-21):** `ACUTIS_MAX_RUNS` (default 4), extra runs queue.
      The exit 137 wasn't an OOM kill: there's no kernel OOM record for Nov 20, so it was likely the Bash tool's timeout. Resource limits (memory, CPU) are still open.
   4. ~~**Killed-turn cost** is still invisible~~ **Done (2026-11-21):** cost is polled live, before a kill, and after a resume.
   5. ~~**Agent sandbox vs gate sandbox differ**~~ **Documented (2026-11-21):** the worker prompt says the agent's shell has no Unix
