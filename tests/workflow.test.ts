@@ -14,8 +14,8 @@ test("parses front matter and template", () => {
   );
   expect(wf.model).toBe("opus");
   expect(wf.gates).toEqual([
-    { name: "bun test", run: "bun test" },
-    { name: "types", run: "bun run typecheck", timeout_s: 60 },
+    { kind: "cmd", name: "bun test", run: "bun test" },
+    { kind: "cmd", name: "types", run: "bun run typecheck", timeout_s: 60 },
   ]);
   expect(wf.allow).toContain("Bash(bun *)");
   expect(wf.deny).toContain("WebFetch");

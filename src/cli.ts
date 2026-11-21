@@ -4,38 +4,75 @@ import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createApp, loadConfig } from "./app";
+import { killAllBrowsers } from "./providers/browser/chrome";
+import { makeNotifier } from "./server/notify";
 import { startServer } from "./server/server";
 
 const USAGE = `acutis — local software factory
 
-Usage:
+Daemon
   acutis serve [--dev] [--allow-api-billing]   Start the daemon and dashboard
+
+Repos and tickets
   acutis repo add <path> [--name N] [--base REV] [--init-jj]
   acutis repo ls
-  acutis ticket add <repo> <title> [--body TEXT]
+  acutis repo notes <repo> [--set TEXT | --file PATH]   Show or set operator notes for workers
+  acutis ticket add <repo> <title> [--body TEXT | --body-file PATH]
   acutis ticket ls
-  acutis start <ticket-id>                      Start a run for a ticket
+  acutis ticket cancel <ticket-id>
 
-Env: ACUTIS_HOME (default ~/.local/share/acutis), ACUTIS_PORT (default 7777)`;
+Runs
+  acutis start <ticket-id> [--watch]           Start a run for a ticket
+  acutis runs                                  List runs
+  acutis show <run>                            State, last agent message, pending permissions
+  acutis watch <run> [--follow]                Stream events; exits when the run needs you
+  acutis perms [<run>]                         Pending permission requests
+  acutis allow <run> <request|all> [--always]  Allow a request (id prefix is enough)
+  acutis deny <run> <request> [--message TEXT]
+  acutis diff <run>
+  acutis msg <run> <text>                      Message the agent (or send back from review)
+  acutis redirect <run> <text>                 Interrupt the agent with new instructions
+  acutis pause|resume|kill|approve|discard <run>
+  acutis note <run> [text] [--image PNG]       Attach a reviewer note (not sent to the agent)
+  acutis preview <run>                         Start the run's preview server and print its URL
+
+Env: ACUTIS_HOME (default ~/.local/share/acutis), ACUTIS_PORT (default 7777),
+     ACUTIS_NOTIFY=off (no desktop notifications), ACUTIS_NOTIFY_URL (POST notifications, e.g. ntfy),
+     ACUTIS_CHROME (browser for previews/checks)`;
 
 const cfg = loadConfig();
 const [cmd, sub, ...rest] = process.argv.slice(2);
+const base = `http://127.0.0.1:${cfg.port}`;
 
-function die(msg: string): never {
+function die(msg: string, code = 1): never {
   console.error(`acutis: ${msg}`);
-  process.exit(1);
+  process.exit(code);
 }
 
-async function api(path: string, init?: { method?: string; body?: unknown }) {
-  const res = await fetch(`http://127.0.0.1:${cfg.port}${path}`, {
+async function api(path: string, init?: { method?: string; body?: unknown; raw?: boolean }) {
+  const res = await fetch(`${base}${path}`, {
     method: init?.method ?? "GET",
     headers: { "content-type": "application/json", "x-acutis": "1" },
     body: init?.body === undefined ? undefined : JSON.stringify(init.body),
   }).catch(() => die(`daemon not reachable on port ${cfg.port}; run "acutis serve" first`));
+  if (init?.raw) {
+    if (!res.ok) die(`HTTP ${res.status}`);
+    return res.text();
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) die((data as any).error ?? `HTTP ${res.status}`);
   return data as any;
 }
+
+const post = (path: string, body?: unknown) => api(path, { method: "POST", body: body ?? {} });
+
+function runArg(v: string | undefined, usage: string): number {
+  const n = Number(v);
+  if (!v || !Number.isInteger(n) || n <= 0) die(`usage: ${usage}`);
+  return n;
+}
+
+// ------------------------------------------------------------------ serve
 
 async function serve(args: string[]) {
   const { values } = parseArgs({
@@ -51,14 +88,40 @@ async function serve(args: string[]) {
   const app = createApp(cfg);
   app.runs.recover();
   startServer(app, { development: values.dev });
-  console.log(`Acutis dashboard: http://127.0.0.1:${cfg.port}`);
+  const notifier = makeNotifier({
+    port: cfg.port,
+    desktop: process.env.ACUTIS_NOTIFY !== "off",
+    webhook: process.env.ACUTIS_NOTIFY_URL || null,
+  });
+  app.hub.subscribe((m) => notifier.handle(m));
+  // Previews, checks and agent processes belong to the daemon: take them down with it.
+  let stopping = false;
+  const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
+    app.runs.shutdown();
+    killAllBrowsers();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  process.on("exit", () => app.runs.previews.stopAll());
+
+  console.log(`Acutis dashboard: ${base}`);
   console.log(`Data: ${cfg.home}`);
   console.log(
     app.sandbox
       ? "Sandbox: on (bubblewrap + socat)"
-      : `Sandbox: OFF (${app.sandboxStatus.reason}).\n  Workers run with a command allowlist; any other command asks you in the dashboard.`,
+      : `Sandbox: OFF (${app.sandboxStatus.reason}).\n` +
+          "  Commands outside the allowlist, and Bash commands that name paths outside the workspace, ask you\n" +
+          "  in the dashboard. File-manipulating commands inside the workspace may run without asking, and\n" +
+          "  allowlisted commands that run code (bun test, bun run…) can still touch anything: this is not a boundary.",
   );
+  console.log(`Browser (previews, browser checks): ${app.browser.available ? "found" : "not found; set ACUTIS_CHROME"}`);
+  console.log(`Notifications: ${notifier.describe()}`);
 }
+
+// ------------------------------------------------------------------ repos
 
 async function repoAdd(args: string[]) {
   const { values, positionals } = parseArgs({
@@ -78,24 +141,237 @@ async function repoAdd(args: string[]) {
   }
   const app = createApp(cfg);
   const name = values.name ?? basename(path);
-  const probe = { name, path, base: "", created_at: "" };
-  let base = values.base;
-  if (!base) {
+  const probe = { name, path, base: "", notes: "", created_at: "" };
+  let baseRev = values.base;
+  if (!baseRev) {
     for (const cand of ["main", "master", "trunk()"]) {
       try {
         const id = await app.workspaces.resolve(probe, cand);
         if (!/^0+$/.test(id)) {
-          base = cand;
+          baseRev = cand;
           break;
         }
       } catch {}
     }
-    if (!base) die("couldn't find a trunk (main/master). Pass --base <revset>.");
+    if (!baseRev) die("couldn't find a trunk (main/master). Pass --base <revset>.");
   } else {
-    await app.workspaces.resolve(probe, base).catch((e) => die(e.message));
+    await app.workspaces.resolve(probe, baseRev).catch((e) => die(e.message));
   }
-  const repo = app.store.addRepo({ name, path, base });
+  const repo = app.store.addRepo({ name, path, base: baseRev });
   console.log(`Registered ${repo.name} → ${repo.path} (base: ${repo.base})`);
+  if (!(await app.workspaces.isBookmark(repo, repo.base))) {
+    console.log(`Note: base "${repo.base}" is not a bookmark, so "land: trunk" won't work for this repo.`);
+  }
+  const jjEmail = (await $`jj config get user.email`.cwd(path).nothrow().quiet()).stdout.toString().trim();
+  if (!jjEmail) {
+    const gitEmail = (await $`git config user.email`.cwd(path).nothrow().quiet()).stdout.toString().trim();
+    console.log(
+      gitEmail
+        ? `Note: jj has no user.email here; Acutis will use git's identity (${gitEmail}) for landed commits.`
+        : 'Warning: neither jj nor git has a user identity here; landed commits will have an empty author.\n  Fix: jj config set --user user.name "..." && jj config set --user user.email "..."',
+    );
+  }
+}
+
+async function repoNotes(args: string[]) {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { set: { type: "string" }, file: { type: "string" } } });
+  const name = positionals[0] ?? die("usage: acutis repo notes <repo> [--set TEXT | --file PATH]");
+  if (values.set !== undefined || values.file) {
+    const notes = values.file ? await Bun.file(values.file).text() : values.set!;
+    await api(`/api/repos/${encodeURIComponent(name)}/notes`, { method: "PUT", body: { notes } });
+    console.log(`Saved notes for ${name} (${notes.length} chars). They reach workers from their next session.`);
+  } else {
+    const r = await api(`/api/repos/${encodeURIComponent(name)}`);
+    console.log(r.notes || "(no notes)");
+  }
+}
+
+// ------------------------------------------------------------------ runs
+
+const STOP_STATES = new Set(["awaiting_review", "done", "failed", "cancelled"]);
+
+/** One line per interesting event; null for events not worth showing. */
+function formatEvent(e: { id: number; kind: string; data: any }): string | null {
+  const d = e.data;
+  const arg = (i: any) => String(i?.command ?? i?.file_path ?? i?.path ?? JSON.stringify(i ?? {})).replace(/\s+/g, " ").slice(0, 140);
+  switch (e.kind) {
+    case "run.state":
+      return `── ${d.to}${d.reason ? ` (${d.reason})` : ""}`;
+    case "agent.text":
+      return `agent: ${String(d.text).trim()}`;
+    case "agent.tool_use":
+      return `  ${d.name} ${arg(d.input)}`;
+    case "agent.result":
+      return `  turn ended: ${d.subtype}, ${d.turns} turns, ${Math.round(d.duration_ms / 1000)}s, +$${Number(d.turn_cost_usd ?? d.cost_usd).toFixed(3)}`;
+    case "permission.request":
+      return `? PERMISSION ${String(d.id).slice(0, 8)} ${d.tool}: ${arg(d.input)}${d.reason ? `  [${d.reason}]` : ""}`;
+    case "permission.decision":
+      return `  permission ${String(d.id).slice(0, 8)} ${d.behavior}${d.by === "timeout" ? " (timed out)" : ""}${d.message ? `: ${d.message}` : ""}`;
+    case "setup.result":
+    case "gate.result":
+      return `${d.ok ? "✓" : "✗"} ${e.kind === "setup.result" ? "setup" : "check"} ${d.run} (${(d.duration_ms / 1000).toFixed(1)}s)${d.ok ? "" : `\n${String(d.output).split("\n").slice(-15).map((l) => `    ${l}`).join("\n")}`}`;
+    case "user.message":
+      return `${d.by === "acutis" ? "acutis" : "you"}${d.mode === "redirect" ? " (redirect)" : ""}: ${String(d.text).split("\n")[0]}`;
+    case "artifact":
+      return `  screenshot: ${d.caption} → ${base}/api/runs/${(e as any).run_id}/artifacts/${d.name}`;
+    case "review.note":
+      return `note: ${d.text}${d.artifact ? " [image]" : ""}`;
+    case "policy.flag":
+      return `! ${d.msg} ${(d.files ?? []).join(", ")}`;
+    case "system.log":
+      return d.level === "error" || d.level === "warn" ? `! ${d.msg}` : `  ${d.msg}`;
+    default:
+      return null;
+  }
+}
+
+async function watch(runId: number, follow: boolean): Promise<never> {
+  const initial = await api(`/api/runs/${runId}`);
+  const shown = new Set<number>();
+  for (const e of initial.events.slice(-20)) {
+    shown.add(e.id);
+    const line = formatEvent(e);
+    if (line) console.log(line);
+  }
+  const needsYou = (state: string, perms: number) => !follow && (STOP_STATES.has(state) || perms > 0);
+  if (needsYou(initial.run.state, initial.permissions.length)) return finish(runId, initial.run.state, initial.permissions);
+
+  const ws = new WebSocket(`ws://127.0.0.1:${cfg.port}/ws`, { headers: { Origin: base } } as any);
+  let state = initial.run.state as string;
+  let closing = false;
+  return new Promise<never>((_, reject) => {
+    ws.onmessage = async (msg) => {
+      const m = JSON.parse(String(msg.data));
+      if (m.type === "run" && m.run.id === runId) state = m.run.state;
+      if (m.type !== "event" || m.event.run_id !== runId || shown.has(m.event.id)) return;
+      shown.add(m.event.id);
+      const line = formatEvent(m.event);
+      if (line) console.log(line);
+      if (m.event.kind === "run.state") state = m.event.data.to;
+      if (!follow && (m.event.kind === "permission.request" || (m.event.kind === "run.state" && STOP_STATES.has(state)))) {
+        closing = true; // our own close, not a lost connection
+        ws.close();
+        const s = await api(`/api/runs/${runId}`);
+        finish(runId, s.run.state, s.permissions);
+      }
+    };
+    ws.onclose = () => {
+      if (!closing) reject(die("lost connection to the daemon"));
+    };
+    ws.onerror = () => reject(die("could not open the event stream"));
+  });
+}
+
+function finish(runId: number, state: string, perms: any[]): never {
+  if (perms.length) {
+    console.log(`\nRun ${runId} is waiting for you:`);
+    for (const p of perms) console.log(`  acutis allow ${runId} ${p.id.slice(0, 8)}    # or: acutis deny ${runId} ${p.id.slice(0, 8)} --message "..."`);
+    process.exit(2);
+  }
+  if (state === "awaiting_review") console.log(`\nRun ${runId} is ready for review: acutis diff ${runId} · acutis approve ${runId} · acutis msg ${runId} "..."`);
+  else console.log(`\nRun ${runId} is ${state}.`);
+  process.exit(state === "failed" ? 1 : 0);
+}
+
+async function resolveReq(runId: number, prefix: string): Promise<string[]> {
+  const s = await api(`/api/runs/${runId}`);
+  const ids: string[] = s.permissions.map((p: any) => p.id);
+  if (prefix === "all") return ids;
+  const hits = ids.filter((id) => id.startsWith(prefix));
+  if (hits.length === 0) die(`no pending request ${prefix} on run ${runId}`);
+  if (hits.length > 1) die(`request prefix ${prefix} is ambiguous`);
+  return hits;
+}
+
+async function show(runId: number) {
+  const s = await api(`/api/runs/${runId}`);
+  const r = s.run;
+  console.log(`Run ${r.id} · ticket #${r.ticket_id} ${s.ticket?.title ?? ""}`);
+  console.log(`  state ${r.state} · ${r.repo} · ${r.model ?? "?"} · attempt ${r.attempt} · ≈$${r.cost_usd.toFixed(2)}${r.gates_ok === null ? "" : r.gates_ok ? " · checks passed" : " · checks failed"}`);
+  if (r.bookmark) console.log(`  landed: ${r.bookmark}`);
+  if (r.workspace_path) console.log(`  workspace: ${r.workspace_path}`);
+  if (r.error) console.log(`  error: ${r.error}`);
+  const last = [...s.events].reverse().find((e: any) => e.kind === "agent.text");
+  if (last) console.log(`\nLast agent message:\n${last.data.text}`);
+  for (const p of s.permissions) console.log(`\n${formatEvent({ id: 0, kind: "permission.request", data: p })}`);
+}
+
+async function runsCmd(c: string, args: string[]) {
+  const usage = `acutis ${c} <run>`;
+  switch (c) {
+    case "runs": {
+      const s = await api("/api/state");
+      const tickets = new Map(s.tickets.map((t: any) => [t.id, t]));
+      for (const r of s.runs) console.log(`${r.id}\t${r.state}\t#${r.ticket_id} ${(tickets.get(r.ticket_id) as any)?.title ?? ""}\t≈$${r.cost_usd.toFixed(2)}`);
+      return;
+    }
+    case "show":
+      return show(runArg(args[0], usage));
+    case "watch": {
+      const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { follow: { type: "boolean" } } });
+      return watch(runArg(positionals[0], "acutis watch <run> [--follow]"), Boolean(values.follow));
+    }
+    case "perms": {
+      const all = args[0] ? (await api(`/api/runs/${runArg(args[0], "acutis perms [<run>]")}`)).permissions.map((req: any) => ({ runId: Number(args[0]), req })) : await api("/api/permissions");
+      if (!all.length) console.log("No pending permission requests.");
+      for (const { runId, req } of all) console.log(`run ${runId}  ${formatEvent({ id: 0, kind: "permission.request", data: req })!.replace(/^\? /, "")}`);
+      return;
+    }
+    case "allow": {
+      const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { always: { type: "boolean" } } });
+      const runId = runArg(positionals[0], "acutis allow <run> <request|all> [--always]");
+      for (const id of await resolveReq(runId, positionals[1] ?? die("which request? (id prefix or all)"))) {
+        await post(`/api/runs/${runId}/permissions/${id}`, { behavior: "allow", always: Boolean(values.always) });
+        console.log(`allowed ${id.slice(0, 8)}`);
+      }
+      return;
+    }
+    case "deny": {
+      const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { message: { type: "string" } } });
+      const runId = runArg(positionals[0], "acutis deny <run> <request> [--message TEXT]");
+      for (const id of await resolveReq(runId, positionals[1] ?? die("which request? (id prefix or all)"))) {
+        await post(`/api/runs/${runId}/permissions/${id}`, { behavior: "deny", message: values.message });
+        console.log(`denied ${id.slice(0, 8)}`);
+      }
+      return;
+    }
+    case "diff":
+      process.stdout.write(await api(`/api/runs/${runArg(args[0], usage)}/diff`, { raw: true }));
+      return;
+    case "msg":
+    case "redirect": {
+      const runId = runArg(args[0], `acutis ${c} <run> <text>`);
+      const text = args.slice(1).join(" ");
+      if (!text.trim()) die(`usage: acutis ${c} <run> <text>`);
+      await post(`/api/runs/${runId}/${c === "msg" ? "message" : "redirect"}`, { text });
+      console.log(c === "msg" ? "sent" : "redirected");
+      return;
+    }
+    case "pause":
+    case "resume":
+    case "kill":
+    case "approve":
+    case "discard": {
+      const runId = runArg(args[0], usage);
+      await post(`/api/runs/${runId}/${c}`);
+      const s = await api(`/api/runs/${runId}`);
+      console.log(`run ${runId}: ${s.run.state}${s.run.bookmark && c === "approve" ? ` (${s.run.bookmark})` : ""}`);
+      return;
+    }
+    case "note": {
+      const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { image: { type: "string" } } });
+      const runId = runArg(positionals[0], "acutis note <run> [text] [--image PNG]");
+      const image = values.image ? Buffer.from(await Bun.file(values.image).arrayBuffer()).toString("base64") : undefined;
+      await post(`/api/runs/${runId}/notes`, { text: positionals.slice(1).join(" "), image });
+      console.log("note added");
+      return;
+    }
+    case "preview": {
+      const r = await post(`/api/runs/${runArg(args[0], usage)}/preview`);
+      console.log(r.url);
+      return;
+    }
+  }
 }
 
 switch (cmd) {
@@ -106,26 +382,56 @@ switch (cmd) {
     if (sub === "add") await repoAdd(rest);
     else if (sub === "ls") {
       for (const r of createApp(cfg).store.listRepos()) console.log(`${r.name}\t${r.base}\t${r.path}`);
-    } else die(USAGE);
+    } else if (sub === "notes") await repoNotes(rest);
+    else die(USAGE);
     break;
   case "ticket":
     if (sub === "add") {
-      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { body: { type: "string" } } });
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { body: { type: "string" }, "body-file": { type: "string" } },
+      });
       const [repo, ...title] = positionals;
-      if (!repo || !title.length) die("usage: acutis ticket add <repo> <title> [--body TEXT]");
-      const t = await api("/api/tickets", { method: "POST", body: { repo, title: title.join(" "), body: values.body ?? "" } });
+      if (!repo || !title.length) die("usage: acutis ticket add <repo> <title> [--body TEXT | --body-file PATH]");
+      const body = values["body-file"] ? await Bun.file(values["body-file"]).text() : values.body ?? "";
+      const t = await post("/api/tickets", { repo, title: title.join(" "), body });
       console.log(`#${t.id} ${t.title}`);
     } else if (sub === "ls") {
       const s = await api("/api/state");
       for (const t of s.tickets) console.log(`#${t.id}\t${t.status}\t${t.repo}\t${t.title}`);
+    } else if (sub === "cancel") {
+      const id = runArg(rest[0], "acutis ticket cancel <ticket-id>");
+      const t = await post(`/api/tickets/${id}/cancel`);
+      console.log(`#${t.id} ${t.status}`);
     } else die(USAGE);
     break;
   case "start": {
-    if (!sub) die("usage: acutis start <ticket-id>");
-    const run = await api(`/api/tickets/${sub}/start`, { method: "POST" });
-    console.log(`Run ${run.id} started for ticket #${sub}. Watch it at http://127.0.0.1:${cfg.port}/#run-${run.id}`);
+    const { values, positionals } = parseArgs({ args: [sub, ...rest].filter((x): x is string => x !== undefined), allowPositionals: true, options: { watch: { type: "boolean" } } });
+    const id = runArg(positionals[0], "acutis start <ticket-id> [--watch]");
+    const run = await post(`/api/tickets/${id}/start`);
+    console.log(`Run ${run.id} started for ticket #${id}. Dashboard: ${base}/#run-${run.id}`);
+    if (values.watch) await watch(run.id, false);
     break;
   }
+  case "runs":
+  case "show":
+  case "watch":
+  case "perms":
+  case "allow":
+  case "deny":
+  case "diff":
+  case "msg":
+  case "redirect":
+  case "pause":
+  case "resume":
+  case "kill":
+  case "approve":
+  case "discard":
+  case "note":
+  case "preview":
+    await runsCmd(cmd, [sub, ...rest].filter((x): x is string => x !== undefined));
+    break;
   default:
     console.log(USAGE);
 }

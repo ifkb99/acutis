@@ -1,6 +1,8 @@
-import { query, type Options, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { resolve, sep } from "node:path";
-import type { AgentEvent, AgentRunner, AgentSession, AgentSpec } from "../../core/types";
+import { createSdkMcpServer, query, tool, type Options, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { resolve } from "node:path";
+import { z } from "zod";
+import { isInside, outsidePaths } from "../../core/paths";
+import type { AcutisTool, AgentEvent, AgentRunner, AgentSession, AgentSpec } from "../../core/types";
 
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const SECRET_PATHS = [".ssh", ".aws", ".gnupg", ".config/gh", ".claude/.credentials.json", ".netrc", ".npmrc"];
@@ -30,10 +32,39 @@ export function probeSandbox(): SandboxStatus {
   };
 }
 
-function isInside(root: string, p: string): boolean {
-  const abs = resolve(root, p);
-  const r = resolve(root);
-  return abs === r || abs.startsWith(r + sep);
+/** Serve Acutis's own tools in-process (never an external MCP server). */
+function acutisServer(tools: AcutisTool[]) {
+  return createSdkMcpServer({
+    name: "acutis",
+    version: "1.0.0",
+    tools: tools.map((t) => {
+      const shape: Record<string, z.ZodTypeAny> = {};
+      for (const [k, p] of Object.entries(t.params)) {
+        const base = p.type === "number" ? z.number() : z.string();
+        shape[k] = (p.optional ? base.optional() : base).describe(p.description);
+      }
+      return tool(
+        t.name,
+        t.description,
+        shape,
+        async (args) => {
+          try {
+            const out = await t.handler(args as Record<string, string | number | undefined>);
+            return {
+              content: [
+                ...(out.images ?? []).map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType })),
+                { type: "text" as const, text: out.text },
+              ],
+              isError: out.isError,
+            };
+          } catch (e) {
+            return { content: [{ type: "text" as const, text: `Acutis tool error: ${(e as Error).message}` }], isError: true };
+          }
+        },
+        { alwaysLoad: true },
+      );
+    }),
+  });
 }
 
 function stringifyToolResult(content: unknown): string {
@@ -62,6 +93,8 @@ class ClaudeSdkSession implements AgentSession {
     this.pending.push(userMessage(spec.prompt));
     const cwd = resolve(spec.cwd);
 
+    const tools = spec.tools ?? [];
+    const toolNames = new Set(tools.map((t) => `mcp__acutis__${t.name}`));
     const options: Options = {
       cwd,
       model: spec.model,
@@ -72,13 +105,19 @@ class ClaudeSdkSession implements AgentSession {
       // Workers report questions in their final message instead of blocking on a prompt.
       disallowedTools: [...spec.deny, "AskUserQuestion"],
       settingSources: ["project"],
-      // Workers get no MCP servers: not your claude.ai connectors (mail, Drive…), not a repo's .mcp.json.
+      // Workers get no external MCP servers: not your claude.ai connectors (mail, Drive…), not a repo's
+      // .mcp.json. The only server is Acutis's own, in-process.
       strictMcpConfig: true,
-      mcpServers: {},
+      mcpServers: tools.length ? { acutis: acutisServer(tools) } : {},
       settings: { disableClaudeAiConnectors: true },
       systemPrompt: { type: "preset", preset: "claude_code", append: spec.systemAppend },
       env: { ...process.env, ACUTIS_WORKER: "1" },
-      canUseTool: async (toolName, input, { signal, suggestions, blockedPath }) => {
+      canUseTool: async (toolName, input, { signal, suggestions, blockedPath, decisionReason, mcpServer }) => {
+        // Acutis's own tools are approved here rather than via allowedTools, keyed on the server
+        // really being our in-process one (source "sdk"), not on the tool-name prefix.
+        if (mcpServer?.source === "sdk" && mcpServer.name === "acutis" && toolNames.has(toolName)) {
+          return { behavior: "allow", updatedInput: input };
+        }
         if (FILE_TOOLS.has(toolName)) {
           const p = (input.file_path ?? input.notebook_path) as string | undefined;
           if (p && !isInside(cwd, p)) {
@@ -100,6 +139,7 @@ class ClaudeSdkSession implements AgentSession {
           tool: toolName,
           input,
           blockedPath,
+          reason: decisionReason,
           canAlwaysAllow: Boolean(suggestions?.length),
         });
         if (decision.behavior === "allow") {
@@ -112,7 +152,30 @@ class ClaudeSdkSession implements AgentSession {
         return { behavior: "deny", message: decision.message || "Denied by the Acutis operator." };
       },
     };
-    if (sandbox) {
+    if (!sandbox) {
+      // Without bubblewrap, allowlisted commands could reach outside the workspace unnoticed
+      // (e.g. `bun build --outdir /tmp/x`). Send any Bash command that names such a path to the operator.
+      options.hooks = {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [
+              async (input: any) => {
+                const outside = outsidePaths(String(input?.tool_input?.command ?? ""), cwd);
+                if (!outside.length) return {};
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: "PreToolUse" as const,
+                    permissionDecision: "ask" as const,
+                    permissionDecisionReason: `names paths outside the workspace: ${outside.slice(0, 5).join(", ")}`,
+                  },
+                };
+              },
+            ],
+          },
+        ],
+      };
+    } else {
       options.sandbox = {
         enabled: true,
         failIfUnavailable: true,

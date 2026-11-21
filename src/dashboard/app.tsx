@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Repo, Run, RunEvent, Ticket, PermissionRequest } from "../core/types";
+import { Markdown } from "./markdown";
 
 // ------------------------------------------------------------------- api
 
@@ -50,11 +51,12 @@ function useHub(onMessage: (m: HubMessage) => void) {
 
 // ------------------------------------------------------------------- app
 
-const COLUMNS: { key: Ticket["status"]; label: string }[] = [
+const COLUMNS: { key: Ticket["status"]; label: string; collapsed?: boolean }[] = [
   { key: "review", label: "Review" },
   { key: "in_progress", label: "In progress" },
   { key: "todo", label: "Todo" },
   { key: "done", label: "Done" },
+  { key: "cancelled", label: "Cancelled", collapsed: true },
 ];
 
 function App() {
@@ -68,6 +70,7 @@ function App() {
     return m ? Number(m[1]) : null;
   });
   const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<Map<string, number>>(new Map());
   const eventSink = useRef<((e: RunEvent) => void) | null>(null);
 
   const reload = useCallback(async () => {
@@ -77,6 +80,7 @@ function App() {
     setRuns(new Map(s.runs.map((r: Run) => [r.id, r])));
     setSandbox(s.sandbox);
     setSandboxReason(s.sandboxReason);
+    setPending(new Map((s.permissions ?? []).map((p: { runId: number; req: PermissionRequest }) => [p.req.id, p.runId])));
   }, []);
 
   useEffect(() => {
@@ -90,8 +94,25 @@ function App() {
   const connected = useHub((m) => {
     if (m.type === "ticket") setTickets((prev) => new Map(prev).set(m.ticket.id, m.ticket));
     else if (m.type === "run") setRuns((prev) => new Map(prev).set(m.run.id, m.run));
-    else if (m.type === "event") eventSink.current?.(m.event);
+    else if (m.type === "event") {
+      const e = m.event;
+      if (e.kind === "permission.request") setPending((p) => new Map(p).set((e.data as any).id, e.run_id));
+      else if (e.kind === "permission.decision") {
+        setPending((p) => {
+          const n = new Map(p);
+          n.delete((e.data as any).id);
+          return n;
+        });
+      }
+      eventSink.current?.(e);
+    }
   });
+
+  // Pending permission requests show in the tab title, so a waiting run is visible from other tabs.
+  useEffect(() => {
+    document.title = pending.size ? `(${pending.size}) Acutis — needs you` : "Acutis";
+  }, [pending]);
+  const pendingRuns = useMemo(() => new Set(pending.values()), [pending]);
 
   // Reload state after reconnecting so nothing missed while offline is lost.
   const wasConnected = useRef(false);
@@ -138,15 +159,11 @@ function App() {
           </div>
         </div>
         <NewTicket repos={repos} onCreate={(t) => setTickets((prev) => new Map(prev).set(t.id, t))} onError={setError} />
+        <RepoNotes repos={repos} onSaved={(r) => setRepos((prev) => prev.map((x) => (x.name === r.name ? r : x)))} onError={setError} />
         {COLUMNS.map((col) => {
           const items = [...tickets.values()].filter((t) => t.status === col.key).sort((a, b) => b.id - a.id);
-          return (
-            <section className="col" key={col.key}>
-              <h2>
-                {col.label} · {items.length}
-              </h2>
-              {items.length === 0 && <div className="empty">Nothing here.</div>}
-              {items.map((t) => {
+          if (col.collapsed && items.length === 0) return null;
+          const cards = items.map((t) => {
                 const r = latestRun.get(t.id);
                 return (
                   <div
@@ -160,6 +177,7 @@ function App() {
                     <div className="meta">
                       <span>{t.repo}</span>
                       {r && <span className={`chip ${r.state}`}>{r.state.replace("_", " ")}</span>}
+                      {r && pendingRuns.has(r.id) && <span className="chip needs">needs you</span>}
                       <span style={{ flex: 1 }} />
                       {t.status === "todo" && (
                         <button
@@ -175,7 +193,26 @@ function App() {
                     </div>
                   </div>
                 );
-              })}
+              });
+          if (col.collapsed) {
+            return (
+              <details className="col" key={col.key}>
+                <summary>
+                  <h2>
+                    {col.label} · {items.length}
+                  </h2>
+                </summary>
+                {cards}
+              </details>
+            );
+          }
+          return (
+            <section className="col" key={col.key}>
+              <h2>
+                {col.label} · {items.length}
+              </h2>
+              {items.length === 0 && <div className="empty">Nothing here.</div>}
+              {cards}
             </section>
           );
         })}
@@ -228,7 +265,7 @@ function NewTicket({ repos, onCreate, onError }: { repos: Repo[]; onCreate: (t: 
   return (
     <form className="newticket" onSubmit={submit}>
       <div className="row" style={{ flexWrap: "nowrap" }}>
-        <select value={repo} onChange={(e) => setRepo(e.target.value)} style={{ width: "40%" }}>
+        <select value={repo} onChange={(e) => setRepo(e.target.value)} style={{ width: "auto", maxWidth: "50%", flex: "0 0 auto" }} title={repo}>
           {repos.map((r) => (
             <option key={r.name}>{r.name}</option>
           ))}
@@ -241,6 +278,58 @@ function NewTicket({ repos, onCreate, onError }: { repos: Repo[]; onCreate: (t: 
       </button>
     </form>
   );
+}
+
+/** Operator guidance per repo. Stored in Acutis's DB (not the repo), appended to every worker's prompt. */
+function RepoNotes({ repos, onSaved, onError }: { repos: Repo[]; onSaved: (r: Repo) => void; onError: (s: string) => void }) {
+  const [repo, setRepo] = useState("");
+  const [text, setText] = useState("");
+  const current = repos.find((r) => r.name === repo);
+  useEffect(() => {
+    if (!repo && repos[0]) setRepo(repos[0].name);
+  }, [repos, repo]);
+  useEffect(() => setText(current?.notes ?? ""), [current?.name, current?.notes]);
+  if (repos.length === 0) return null;
+  const dirty = text !== (current?.notes ?? "");
+  return (
+    <details className="reponotes">
+      <summary>Operator notes for workers{current?.notes ? " ✓" : ""}</summary>
+      <div className="row" style={{ flexWrap: "nowrap" }}>
+        <select value={repo} onChange={(e) => setRepo(e.target.value)} style={{ width: "auto" }}>
+          {repos.map((r) => (
+            <option key={r.name}>{r.name}</option>
+          ))}
+        </select>
+      </div>
+      <textarea
+        placeholder="Guidance every worker on this repo gets, e.g. “Use the Edit tool, not scripts, for file changes.”"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+      />
+      <button
+        className="btn"
+        disabled={!dirty}
+        onClick={async () => {
+          try {
+            onSaved(await api<Repo>(`/api/repos/${encodeURIComponent(repo)}/notes`, "PUT", { notes: text }));
+          } catch (e) {
+            onError((e as Error).message);
+          }
+        }}
+      >
+        Save notes
+      </button>
+    </details>
+  );
+}
+
+function readPng(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).replace(/^data:image\/png;base64,/, ""));
+    r.onerror = () => reject(new Error("could not read image"));
+    r.readAsDataURL(file);
+  });
 }
 
 // ------------------------------------------------------------------- run view
@@ -260,6 +349,7 @@ function RunView({
   const [perms, setPerms] = useState<PermissionRequest[]>([]);
   const [tab, setTab] = useState<"activity" | "diff">("activity");
   const [text, setText] = useState("");
+  const [image, setImage] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -287,10 +377,23 @@ function RunView({
   const post = (path: string, body?: unknown) => act(() => api(`/api/runs/${run.id}/${path}`, "POST", body));
   const s = run.state;
   const canMessage = ["running", "paused", "awaiting_review", "failed"].includes(s);
+  const canNote = s !== "preparing";
   const send = (mode: "message" | "redirect") => {
     if (!text.trim()) return;
     post(mode, { text }).then(() => setText(""));
   };
+  const addNote = () => {
+    if (!text.trim() && !image) return;
+    post("notes", { text, image: image ?? undefined }).then(() => {
+      setText("");
+      setImage(null);
+    });
+  };
+  const openPreview = () =>
+    act(async () => {
+      const { url } = await api<{ url: string }>(`/api/runs/${run.id}/preview`, "POST");
+      window.open(url, "_blank", "noopener");
+    });
 
   return (
     <>
@@ -306,17 +409,27 @@ function RunView({
           <span>{run.repo}</span>
           {run.model && <span>{run.model}</span>}
           <span>attempt {run.attempt}</span>
-          <span title="API-equivalent estimate; billed against your subscription">≈${run.cost_usd.toFixed(2)}</span>
+          <span title="API-equivalent estimate; billed against your subscription. Updated when each turn ends.">≈${run.cost_usd.toFixed(2)}</span>
           {run.gates_ok !== null && <span style={{ color: run.gates_ok ? "var(--ok)" : "var(--err)" }}>checks {run.gates_ok ? "passed" : "failed"}</span>}
           {run.bookmark && <span>bookmark {run.bookmark}</span>}
           {run.workspace_path && <span title={run.workspace_path}>workspace {run.workspace_name}</span>}
         </div>
-        {ticket?.body && <div style={{ color: "var(--muted)", whiteSpace: "pre-wrap", fontSize: 13 }}>{ticket.body}</div>}
+        {ticket?.body && (
+          <details className="ticketbody" open={ticket.body.length < 400}>
+            <summary>Ticket</summary>
+            <Markdown text={ticket.body} />
+          </details>
+        )}
         <div className="row">
           {s === "running" && <button className="btn" onClick={() => post("pause")}>Pause</button>}
           {s === "paused" && <button className="btn" onClick={() => post("resume")}>Resume</button>}
           {s === "awaiting_review" && (
             <button className="btn primary" onClick={() => post("approve")}>Approve &amp; land</button>
+          )}
+          {run.workspace_path && !["done", "failed", "cancelled"].includes(s) && (
+            <button className="btn" onClick={openPreview} title="Start this run's preview server (if the repo has one) and open it">
+              Open preview
+            </button>
           )}
           {["preparing", "running", "paused", "verifying", "awaiting_review"].includes(s) && (
             <button className="btn danger" onClick={() => confirm("Kill this run? The workspace is kept until you discard it.") && post("kill")}>
@@ -336,6 +449,7 @@ function RunView({
           <div>
             <b>Permission needed:</b> <code>{p.tool}</code>
             {p.blockedPath && <> (path outside workspace: <code>{p.blockedPath}</code>)</>}
+            {p.reason && <div className="hint">Why: {p.reason}</div>}
           </div>
           <pre>{p.tool === "Bash" ? String((p.input as any).command ?? "") : JSON.stringify(p.input, null, 2)}</pre>
           <div className="row">
@@ -365,34 +479,56 @@ function RunView({
 
       {tab === "activity" ? <Timeline events={events} root={run.workspace_path} /> : <DiffView run={run} />}
 
-      {canMessage && (
+      {canNote && (
         <div className="composer">
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
             <textarea
               placeholder={
-                s === "awaiting_review"
-                  ? "Send back with a note: what should change?"
-                  : s === "running"
-                    ? "Message the agent (queued), or Redirect to interrupt it"
-                    : "Message to continue the session"
+                !canMessage
+                  ? "Add a review note to this run"
+                  : s === "awaiting_review"
+                    ? "Send back with a note: what should change? (or Add note to record it without sending)"
+                    : s === "running"
+                      ? "Message the agent (queued), or Redirect to interrupt it"
+                      : "Message to continue the session"
               }
               value={text}
               onChange={(e) => setText(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(e.shiftKey ? "redirect" : "message");
               }}
+              onPaste={(e) => {
+                const f = [...e.clipboardData.files].find((f) => f.type === "image/png");
+                if (f) {
+                  e.preventDefault();
+                  readPng(f).then(setImage, (err) => act(() => Promise.reject(err)));
+                }
+              }}
             />
-            <span className="hint">Ctrl+Enter sends · Ctrl+Shift+Enter redirects</span>
+            <span className="hint">
+              Ctrl+Enter sends · Ctrl+Shift+Enter redirects · paste a PNG to attach it to a note
+              {image && (
+                <>
+                  {" "}· image attached{" "}
+                  <button className="btn sm" onClick={() => setImage(null)}>remove</button>
+                </>
+              )}
+            </span>
           </div>
           <div className="row" style={{ flexDirection: "column", alignItems: "stretch" }}>
-            <button className="btn primary" disabled={!text.trim()} onClick={() => send("message")}>
-              {s === "awaiting_review" ? "Send back" : "Send"}
-            </button>
+            {canMessage && (
+              <button className="btn primary" disabled={!text.trim()} onClick={() => send("message")}>
+                {s === "awaiting_review" ? "Send back" : "Send"}
+              </button>
+            )}
             {s === "running" && (
               <button className="btn" disabled={!text.trim()} onClick={() => send("redirect")} title="Interrupt the current turn and give new instructions">
                 Redirect
               </button>
             )}
+            <button className="btn" disabled={!text.trim() && !image} onClick={addNote} title="Save a review note on this run (not sent to the agent)">
+              Add note
+            </button>
           </div>
         </div>
       )}
@@ -432,13 +568,22 @@ function Timeline({ events, root }: { events: RunEvent[]; root: string | null })
     >
       {events.length === 0 && <div className="empty">Waiting for events…</div>}
       {events.map((e) => (
-        <EventRow key={e.id} e={e} results={results} root={root} />
+        <EventRow key={e.id} e={e} results={results} root={root} runId={e.run_id} />
       ))}
     </div>
   );
 }
 
-function EventRow({ e, results, root }: { e: RunEvent; results: Map<string, any>; root: string | null }) {
+function Shot({ runId, name, caption }: { runId: number; name: string; caption?: string }) {
+  const src = `/api/runs/${runId}/artifacts/${encodeURIComponent(name)}`;
+  return (
+    <a className="shot" href={src} target="_blank" rel="noreferrer noopener" title={caption}>
+      <img src={src} alt={caption ?? "screenshot"} loading="lazy" />
+    </a>
+  );
+}
+
+function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<string, any>; root: string | null; runId: number }) {
   const d = e.data as any;
   switch (e.kind) {
     case "run.state":
@@ -451,7 +596,11 @@ function EventRow({ e, results, root }: { e: RunEvent; results: Map<string, any>
     case "agent.init":
       return <div className="ev log">session {String(d.session_id).slice(0, 8)} · {d.model} · sandbox {d.sandboxed ? "on" : "off"}</div>;
     case "agent.text":
-      return <div className="ev text">{d.text}</div>;
+      return (
+        <div className="ev text">
+          <Markdown text={String(d.text)} />
+        </div>
+      );
     case "agent.tool_use": {
       const r = results.get(d.id);
       return (
@@ -473,7 +622,7 @@ function EventRow({ e, results, root }: { e: RunEvent; results: Map<string, any>
     case "agent.result":
       return (
         <div className="ev result">
-          turn ended: {d.subtype} · {d.turns} turns · {(d.duration_ms / 1000).toFixed(0)}s · ≈${Number(d.cost_usd).toFixed(3)}
+          turn ended: {d.subtype} · {d.turns} turns · {(d.duration_ms / 1000).toFixed(0)}s · ≈${Number(d.turn_cost_usd ?? d.cost_usd).toFixed(3)}
         </div>
       );
     case "user.message":
@@ -484,26 +633,50 @@ function EventRow({ e, results, root }: { e: RunEvent; results: Map<string, any>
         </div>
       );
     case "gate.start":
+    case "setup.start":
       return null;
     case "gate.result":
+    case "setup.result":
       return (
         <div className="ev">
           <details className={`tool gate ${d.ok ? "ok" : "fail"}`} open={!d.ok}>
             <summary>
-              <span className="name">{d.ok ? "✓" : "✗"} check</span>
+              <span className="name">{d.ok ? "✓" : "✗"} {e.kind === "setup.result" ? "setup" : "check"}</span>
               <span className="arg">{d.run}</span>
               <span className="st">{(d.duration_ms / 1000).toFixed(1)}s</span>
             </summary>
+            {d.artifact && <Shot runId={runId} name={d.artifact} caption={d.name} />}
             <pre>{d.output || "(no output)"}</pre>
           </details>
         </div>
       );
+    case "artifact":
+      if (d.source === "gate" || d.source === "operator") return null; // shown with the check or note
+      return (
+        <div className="ev log">
+          {d.caption}
+          <Shot runId={runId} name={d.name} caption={d.caption} />
+        </div>
+      );
+    case "review.note":
+      return (
+        <div className="ev note">
+          <div className="who">Review note</div>
+          {d.text && <Markdown text={d.text} />}
+          {d.artifact && <Shot runId={runId} name={d.artifact} caption={d.text} />}
+        </div>
+      );
     case "permission.request":
-      return <div className="ev log warn">permission requested: {d.tool} {toolArg(d.tool, d.input)}</div>;
+      return (
+        <div className="ev log warn">
+          permission requested: {d.tool} {toolArg(d.tool, d.input)}
+          {d.reason ? ` — ${d.reason}` : ""}
+        </div>
+      );
     case "permission.decision":
       return (
         <div className="ev log">
-          permission {d.behavior === "allow" ? (d.always ? "allowed for run" : "allowed") : "denied"}: {d.tool}
+          permission {d.behavior === "allow" ? (d.always ? "allowed for run" : "allowed") : d.by === "timeout" ? "timed out (denied)" : "denied"}: {d.tool}
           {d.message ? ` (${d.message})` : ""}
         </div>
       );

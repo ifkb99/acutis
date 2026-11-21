@@ -3,30 +3,34 @@ import { existsSync, rmSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Repo, Workspace, WorkspaceProvider } from "../../core/types";
 
-let identityEnv: Record<string, string> | null = null;
+const identityCache = new Map<string, Record<string, string>>();
 
-/** jj refuses to push commits with an empty identity; fall back to git's identity. */
-async function identity(): Promise<Record<string, string>> {
-  if (identityEnv) return identityEnv;
+/**
+ * Commits need an author; jj leaves it empty when user.name/email aren't configured. Fall back to
+ * git's identity. Resolved in the directory jj will run in, because jj and git both read repo-level
+ * config: the daemon's own cwd says nothing about the target repo.
+ */
+export async function identityFor(cwd: string): Promise<Record<string, string>> {
+  const cached = identityCache.get(cwd);
+  if (cached) return cached;
+  const get = async (cmd: string[]) => (await $`${cmd}`.cwd(cwd).nothrow().quiet()).stdout.toString().trim();
   const env: Record<string, string> = {};
-  const jjName = (await $`jj config get user.name`.nothrow().quiet()).stdout.toString().trim();
-  const jjEmail = (await $`jj config get user.email`.nothrow().quiet()).stdout.toString().trim();
-  if (!jjName) {
-    const n = (await $`git config user.name`.nothrow().quiet()).stdout.toString().trim();
+  if (!(await get(["jj", "config", "get", "user.name"]))) {
+    const n = await get(["git", "config", "user.name"]);
     if (n) env.JJ_USER = n;
   }
-  if (!jjEmail) {
-    const e = (await $`git config user.email`.nothrow().quiet()).stdout.toString().trim();
+  if (!(await get(["jj", "config", "get", "user.email"]))) {
+    const e = await get(["git", "config", "user.email"]);
     if (e) env.JJ_EMAIL = e;
   }
-  identityEnv = env;
+  identityCache.set(cwd, env);
   return env;
 }
 
 export class JjError extends Error {}
 
 async function jj(cwd: string, args: string[], retryStale = true): Promise<string> {
-  const env = { ...process.env, ...(await identity()) };
+  const env = { ...process.env, ...(await identityFor(cwd)) };
   const res = await $`jj --no-pager --color=never ${args}`.cwd(cwd).env(env).nothrow().quiet();
   if (res.exitCode !== 0) {
     const err = res.stderr.toString();
@@ -89,10 +93,35 @@ export class JjWorkspaceProvider implements WorkspaceProvider {
     return out.split("\n").filter(Boolean);
   }
 
-  async land(_repo: Repo, ws: Workspace, opts: { message: string; bookmark: string; push: boolean }) {
+  async land(_repo: Repo, ws: Workspace, opts: { message: string; bookmark: string | null; push: boolean }) {
     await jj(ws.path, ["describe", "-m", opts.message]);
+    if (!opts.bookmark) return;
     await jj(ws.path, ["bookmark", "set", opts.bookmark, "-r", "@", "--allow-backwards"]);
     if (opts.push) await jj(ws.path, ["git", "push", "--bookmark", opts.bookmark]);
+  }
+
+  async rebase(_repo: Repo, ws: Workspace, onto: string): Promise<{ moved: boolean; conflicts: string[] }> {
+    const parents = (await jj(ws.path, ["log", "--no-graph", "-r", "@-", "-T", 'commit_id ++ "\\n"'])).split("\n").filter(Boolean);
+    const moved = !(parents.length === 1 && parents[0] === onto);
+    if (moved) await jj(ws.path, ["rebase", "-r", "@", "-d", onto]);
+    // Always check: a change rebased by an earlier, stopped landing already sits on trunk but may
+    // still be conflicted.
+    const conflicted = (await jj(ws.path, ["log", "--no-graph", "-r", "@", "-T", 'if(conflict, "yes", "no")'])).trim();
+    if (conflicted !== "yes") return { moved, conflicts: [] };
+    const list = await jj(ws.path, ["resolve", "--list"]).catch(() => "");
+    const conflicts = list.split("\n").map((l) => l.trim().split(/\s+/)[0]!).filter(Boolean);
+    return { moved, conflicts: conflicts.length ? conflicts : ["(unknown files)"] };
+  }
+
+  async advance(_repo: Repo, ws: Workspace, bookmark: string) {
+    // No --allow-backwards: if trunk moved sideways since the rebase, this fails instead of dropping work.
+    await jj(ws.path, ["bookmark", "set", bookmark, "-r", "@"]);
+  }
+
+  async isBookmark(repo: Repo, name: string): Promise<boolean> {
+    if (!/^[A-Za-z0-9._\/-]+$/.test(name)) return false;
+    const out = await jj(repo.path, ["bookmark", "list", "--ignore-working-copy", "-T", 'name ++ "\\n"']).catch(() => "");
+    return out.split("\n").includes(name);
   }
 
   async destroy(repo: Repo, ws: Workspace, opts: { abandon: boolean }) {

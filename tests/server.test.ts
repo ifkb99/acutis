@@ -55,3 +55,31 @@ test("WebSocket from the dashboard origin connects", async () => {
   });
   ws.close();
 });
+
+const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+const h = { "content-type": "application/json", "x-acutis": "1" };
+
+test("artifacts are served as PNG with nosniff; unknown names are 404", async () => {
+  app.store.addRepo({ name: "srv", path: "/nonexistent", base: "main" });
+  const t = app.tickets.create({ repo: "srv", title: "x", body: "" });
+  const run = app.store.createRun({ ticket_id: t.id, repo: "srv", state: "awaiting_review" });
+  const name = app.runs.saveArtifact(run.id, PNG, "shot", "gate")!;
+  const res = await fetch(`${base}/api/runs/${run.id}/artifacts/${name}`);
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toBe("image/png");
+  expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+  expect((await fetch(`${base}/api/runs/${run.id}/artifacts/..%2F..%2Facutis.db`)).status).toBe(404);
+
+  const note = await fetch(`${base}/api/runs/${run.id}/notes`, { method: "POST", headers: h, body: JSON.stringify({ text: "hi", image: PNG }) });
+  expect(note.status).toBe(200);
+  expect(((await note.json()) as any).data.artifact).toMatch(/\.png$/);
+  const bad = await fetch(`${base}/api/runs/${run.id}/notes`, { method: "POST", headers: h, body: JSON.stringify({ text: "x", image: btoa("<svg onload=alert(1)>") }) });
+  expect(bad.status).toBe(415);
+});
+
+test("repo notes can be read and set", async () => {
+  const put = await fetch(`${base}/api/repos/srv/notes`, { method: "PUT", headers: h, body: JSON.stringify({ notes: "Use Edit." }) });
+  expect(put.status).toBe(200);
+  expect(((await (await fetch(`${base}/api/repos/srv`)).json()) as any).notes).toBe("Use Edit.");
+  expect((await fetch(`${base}/api/repos/srv/notes`, { method: "PUT", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(403);
+});

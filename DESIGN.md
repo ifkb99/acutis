@@ -8,7 +8,7 @@ human pause, redirect, message or kill it.
 It is built for web development first, but the webdev parts live in a **pack**
 the core never imports.
 
-Status: M0 and M1 implemented, 2026-11-19 (see §9). The owner approved running workers on their personal Max login.
+Status: M0 and M1 implemented, 2026-11-19; the dogfood follow-ups (previews, browser checks, `land: trunk`, setup steps, operator notes, full CLI) landed 2026-11-20 (see §9 and `notes/dogfood-tile-merge.md`). The owner approved running workers on their personal Max login.
 
 ---
 
@@ -206,18 +206,39 @@ the repo the agent edits. Acutis therefore loads gates and permissions from the
 trunk revision at run start, and flags any diff that touches `.acutis/` for
 explicit human review. Otherwise a worker could loosen its own gates (principle 2).
 
-Example front matter:
+Example front matter (what is implemented today):
 
 ```yaml
-pack: webdev
-roles: { implement: { model: opus, effort: high } }
+model: opus
+effort: high
+setup:                      # run in a fresh workspace before the agent starts
+  - bun install
+preview: bun --port=$PORT ./index.html   # Acutis runs it on a free 127.0.0.1 port ($PORT/$BUN_PORT)
 gates:
-  - run: bun run typecheck
-  - run: bun test
-  - screenshot: { service: web, paths: ["/"] }   # pack: webdev
-permissions: { allow: ["Bash(bun *)", "Bash(git diff*)"], mode: acceptEdits }
-land: bookmark            # bookmark | pr
+  - bunx tsc --noEmit
+  - bun test
+  - name: home page works
+    browser:                # headless Chrome against the preview; fails on page errors or a falsy script
+      path: /
+      width: 390
+      steps: |              # press <Key> | click <css> | type <text> | wait <ms> | swipe <dir> [css]
+        press ArrowLeft
+      script: "document.querySelector('#app') !== null"
+permissions: { allow: ["Bash(bun test:*)", "Bash(bun run:*)"] }
+permission_timeout_s: 900   # auto-deny unanswered prompts (default: wait forever)
+max_attempts: 2
+land: trunk                 # bookmark | push | trunk
 ```
+
+`land: trunk` rebases the approved change onto the current trunk bookmark, re-runs every gate on
+the combined result if trunk moved, and advances the bookmark (never backwards; conflicts or
+failing re-checks put the run back in review). Landings are serialised per repo. It requires the
+repo's base to be a plain bookmark.
+
+**Operator notes** are the one policy input that does not come from trunk: free text per repo,
+stored in Acutis's database (`acutis repo notes`, or the dashboard), appended to every worker's
+system prompt. They live outside every workspace, so workers cannot edit them; they can only add
+guidance, not loosen gates or permissions.
 
 ## 8. Dashboard
 
@@ -258,14 +279,43 @@ The dashboard lists runs grouped by state. Each run shows:
   `resume: session_id`.
 - After a daemon restart, live runs become `paused`; Resume reattaches with
   `resume`.
-- Workers get **no MCP servers**: `strictMcpConfig`, an empty `mcpServers`,
-  and `disableClaudeAiConnectors`. Without these, a worker picked up the
+- Workers get **no external MCP servers**: `strictMcpConfig`, and
+  `disableClaudeAiConnectors`. The only server is Acutis's own, in-process `acutis` server
+  (`preview` and `browser` tools), present only when the repo's workflow declares a `preview`.
+  The browser tool takes a path, never a URL. Its headless Chrome fails every request to another
+  origin made by the page, its dedicated workers, iframes and popups (browser- and page-level CDP
+  `Fetch` interception; new targets are auto-attached paused, and popups are closed), so the
+  browser tool can't be used to drive the dashboard on 127.0.0.1:7777. WebSocket handshakes are
+  not intercepted; the dashboard's `/ws` refuses foreign origins and is receive-only. This covers
+  the browser tool only: any local process can call the API with the `x-acutis` header (the CLI
+  relies on that), so with the sandbox off, code run by an allowlisted command such as `bun test`
+  could still approve a run. Without these, a worker picked up the
   owner's claude.ai connectors a few seconds into the session (verified
   2026-11-19).
 - There is no blanket `Read` allow. Reads inside the workspace are automatic,
   reads outside ask the operator, and credential paths (`~/.ssh`, `~/.aws`,
   gh, Claude credentials…) are hard-denied. Verified with a real-agent probe
   on 2026-11-19.
+
+### Implementation notes (dogfood follow-ups, 2026-11-20)
+
+- **Cost:** the SDK's `total_cost_usd` is a running total per `query()` (and a resumed session
+  continues from its saved total). Runs add the delta per result, not the total.
+- **Sandbox off:** a PreToolUse hook sends any Bash command that names a user-writable path
+  outside the workspace (`/tmp`, `$HOME`, `../…`) to the operator, even if the command is
+  allowlisted (verified: a hook `ask` overrides an `allowedTools` match). It is a heuristic:
+  allowlisted commands that run code (`bun test`, `bun run`) can still touch anything.
+- **Previews** are owned by the daemon (principle 4): one per run, started on demand by the
+  agent's `preview`/`browser` tools, a browser gate, or the reviewer's "Open preview"; killed on
+  approve, discard, kill, failure and daemon shutdown. This is the minimal, Compose-free slice of
+  §5; ports, DBs and hostnames per lease are still M2.
+- **Artifacts** (check screenshots, agent screenshots, note images) are PNGs stored under
+  `$ACUTIS_HOME/artifacts/run-N/` with server-generated names and served as `image/png` with
+  `nosniff`. Worker-written text renders in the dashboard as React elements only (a small
+  Markdown subset; no raw HTML, http(s) links only, no images).
+- **Notifications:** `notify-send` if installed (`ACUTIS_NOTIFY=off` to disable) and/or a POST to
+  `ACUTIS_NOTIFY_URL`, on permission requests, review and failure. The tab title shows pending
+  permission requests.
 
 ## 10. Open questions
 
