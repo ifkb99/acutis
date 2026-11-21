@@ -333,8 +333,11 @@ The dashboard lists runs grouped by state. Each run shows:
   from the link `acutis serve` prints (`#token=…`) and keeps it in `localStorage`, which is scoped
   per port. It is not a cookie: cookies ignore the port, so the browser would send one to the
   worker-written preview on "Open preview". Gates and previews run with `$ACUTIS_HOME` hidden, the
-  agent's file tools and sandbox (`filesystem.denyRead`, `Read(//…)`) are set to deny the token
-  file (not yet checked with a real agent), and the token never goes into the environment. **Limit:** with the sandbox off, worker code runs as you and can read the file
+  agent's file tools and sandbox (`filesystem.denyRead`, `Read(//…)`) deny the token file, and the
+  token never goes into the environment. **Verified 2026-11-21** with a real-agent probe ($0.16): Read
+  and `cat` of the token are denied, and the API is unreachable. Every host Unix socket tried (session/system
+  D-Bus, docker.sock, ibus, wezterm, nix-daemon) is refused: Claude Code's agent sandbox blocks Unix sockets
+  outright (`listen` gets EPERM). So the socket hole below is in Acutis's gate/preview sandbox only. **Limit:** with the sandbox off, worker code runs as you and can read the file
   without naming it (`bun test` running a test that opens it), so there the token raises the bar
   but is not a boundary.
 - There is no blanket `Read` allow. Reads inside the workspace are automatic,
