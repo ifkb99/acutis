@@ -111,3 +111,55 @@ The second dogfood round, on real repos instead of a toy. The sandbox is on for 
     That's a design call for the user.
   - It's a 1.1k-line diff, mostly moving the battle code into `battles()`. A reviewer has to trust the tests plus the gates here. A behaviour
     diff of a short real heatmap run, before and after, would be a nice gate for instrument refactors.
+- **Run 9 (duke-ml quiescence): $4.27 for the first turn. Real AI research.**
+  - **Noisy moves:** captures, strikes, and *capturing commands*, plus all evasions when in check (so it finds mates a ply earlier).
+    It has a stand-pat bound, MVV ordering and a cap of 6 extra plies. Quiescence TT entries are stored at depth 0, so they never overwrite deeper ones.
+  - **Strength at equal depth vs the old search:** 0.92 / 0.94 / 0.84 / 0.81 / 0.84 / 0.80 at depths 1–6 (400 games per row down to 64),
+    with plain-vs-plain controls at 0.49. **At roughly equal time** (q:d vs plain:d+1) the edge shrinks: 0.79 → 0.71 → 0.55 (not significant at 5 vs 6).
+  - **It found and fixed two existing bugs:** (1) the aspiration window kept searching the root with an inverted window after a fail,
+    which wrote bad TT entries, so `findBestMove` sometimes missed a forced mate that `scoreRootMoves` found; (2) Float32 TT scores caused 16
+    mismatches in 150 games, so they're now Float64.
+  - It checked that its tests catch the old behaviour (dropping capturing commands from the noisy set fails the command test).
+  - **It turned quiescence on by default, which I pushed back on.** That changes the live web AI (depth 6, about 0.2 s/move to about 1 s) and the
+    minimax that generates training data, for a gain its own equal-time numbers don't show at depth 6. I sent `msg` asking for it off
+    by default, with everything else kept. Shipping it is the owner's call.
+  - **The workflow is good at this.** The seeded RNG (run 5) plus the match CLI (run 6) turned "is it stronger?" into a table with
+    confidence intervals and controls, which is objective evidence a reviewer can act on.
+- **Run 9 follow-up ($0.54 more, $4.81 total):** quiescence is now off by default, with a test pinning it, and the `minimax-rng` tests are restored
+  unchanged. `minimax:<d>` follows the default. Kept: the option, the `-q`/`-noq` specs, both bug fixes and the quiescence tests. Landed.
+
+## Results
+| Run | Repo | Ticket | Cost | Attempts | Outcome |
+|---|---|---|---|---|---|
+| 5 | duke-ml | seeded RNG for minimax draws | $0.46 | 1 | landed |
+| 6 | duke-ml | minimax agent + match CLI | $1.12 | 1 (+1 msg) | landed via rebase onto run 5 |
+| 9 | duke-ml | quiescence search, measured | $4.81 | 1 (+1 msg) | landed, off by default |
+| 7 | stahl | strict orders file | $0.67 | 1 | landed |
+| 10 | stahl | `objective_arrival` planner field | $0.95 | 1 | landed, snapshot identical |
+| 12 | stahl | heatmap strict flags + `--help` | $1.61 | 1 | landed |
+| 8 | hegel | offline dialectic loop (SVG) | $1.98 | 1 | landed |
+| 11 | hegel | recursive dialectic | $2.62 | 1 | landed |
+
+**8 of 8 landed, all with gates green on the first attempt; $14.22 total.** Two runs got a reviewer `msg`. One was a lockfile question,
+where the worker showed my concern was wrong. The other was a default I reversed for owner-decision reasons. No run needed a retry.
+
+**Delivered:** `acutis/trial` was fetched into `~/Workspace/duke-ml` (on top of local `main`) and `~/Workspace/stahlsenshamädchen` (on top of
+`feat/slice`). Nothing was pushed, and checkouts are unchanged. hegel-triangles has no VCS, so the result lives in `~/Workspace/acutis-trials/hegel-triangles`
+(jj/git, `main`).
+
+## What this round says about Acutis
+- **Works:** sandboxed agents and gates across Rust, npm/TS and SvelteKit with no network; parallel runs, including two on one repo
+  landing through rebase and re-check; daemon restart and resume mid-turn; `msg` for review follow-ups; the gate as policy
+  (the stahl snapshot checksum held, and every worker respected it); and screenshots as review evidence (hegel).
+- **Fixed during the round:** gates and previews were unsandboxed; Bash prompts under the sandbox guarded nothing; sandbox placeholder
+  files could land.
+- **Open, by priority:**
+  1. **The preview server can reach the Acutis API** (host network). Needs the per-daemon token.
+  2. **Placeholder files still confuse tree-walking tools** inside the agent's sandbox (`prettier .`). Find a way not to mount them.
+  3. **No concurrency or resource limits** (a cargo exit 137 under 4 concurrent runs).
+  4. **Killed-turn cost** is still invisible (the restart showed $0.00 for interrupted turns).
+  5. **Agent sandbox vs gate sandbox differ:** `tsx` IPC works in gates but not for the agent, so agents had to work around it.
+     Aligning them (or documenting it in the worker prompt) would save turns.
+  6. **The reviewer still has to judge "owner decisions"** (run 9's default). A workflow field like `ask_before:` ("changing
+     defaults that affect the web app or training") could make workers stop and ask instead.
+  7. Small: `watch` labels gates by command, not name; a "re-run setup" gate would catch setup-breaking changes.
