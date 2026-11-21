@@ -1,6 +1,7 @@
 // Core types and provider interfaces. core/ must not import providers/ or packs/.
 
-export type TicketStatus = "todo" | "in_progress" | "review" | "done" | "cancelled";
+/** proposed: filed by a scout, waiting for the operator. held: waiting on an open decision. */
+export type TicketStatus = "proposed" | "held" | "todo" | "in_progress" | "review" | "done" | "cancelled";
 
 export interface Repo {
   name: string;
@@ -18,7 +19,14 @@ export interface Ticket {
   title: string;
   body: string;
   status: TicketStatus;
+  /** "local"; "scout:<type>" for a ticket a scout filed; "scout-run:<type>" for a scout's own (hidden) runner ticket. */
   source: string;
+  /** A scout's confidence in a ticket it filed. */
+  confidence: "high" | "medium" | "low" | null;
+  /** The open decision a held ticket waits on. */
+  decision_id: number | null;
+  /** The noticed report a scout turned into this ticket (marked ticketed once the ticket is accepted). */
+  noticed_id: number | null;
   external_id: string | null;
   created_at: string;
   updated_at: string;
@@ -45,6 +53,10 @@ export interface Run {
   id: number;
   ticket_id: number;
   repo: string;
+  /** work: a worker on a ticket (lands after review). scout: finds work, files tickets and decisions, lands nothing. */
+  kind: "work" | "scout";
+  /** The scout type, for scout runs. */
+  scout: string | null;
   state: RunState;
   workspace_name: string | null;
   workspace_path: string | null;
@@ -79,10 +91,21 @@ export interface TicketSource {
   readonly name: string;
   list(filter?: { repo?: string; status?: TicketStatus }): Ticket[];
   get(id: number): Ticket | null;
-  create(input: { repo: string; title: string; body: string }): Ticket;
+  create(input: {
+    repo: string;
+    title: string;
+    body: string;
+    source?: string;
+    status?: TicketStatus;
+    confidence?: Ticket["confidence"];
+    decision_id?: number | null;
+    noticed_id?: number | null;
+  }): Ticket;
   /** Transactional claim: returns false if the ticket is not claimable. */
   claim(id: number): boolean;
   setStatus(id: number, status: TicketStatus): Ticket;
+  /** Move tickets held on one decision to another (merged questions), or back to proposed (null). */
+  moveHeld(fromDecision: number, toDecision: number | null): void;
 }
 
 // ---- Workspaces -------------------------------------------------------------
@@ -295,6 +318,43 @@ export interface Workflow {
   source: string;
   /** Which tracked files the project library indexes; false turns the library off for the repo. */
   library: { include: string[]; exclude: string[] } | false;
+  /** Scouts the repo allows, with a focus and budget each; false turns scouts off. */
+  scouts:
+    | {
+        /** high: high-confidence scout tickets go straight to todo. never: all wait in proposed. */
+        auto_tickets: "high" | "never";
+        budget_usd: number;
+        types: Record<string, { enabled: boolean; focus: string; budget_usd?: number }>;
+      }
+    | false;
+}
+
+/**
+ * The decision register: a question a scout asked (open) and the operator's answer (decided) are
+ * one row. A decided row is never edited; a new decision supersedes it. Decided text is always
+ * written or confirmed by the operator, since it goes into every worker's prompt with their authority.
+ */
+export interface Decision {
+  id: number;
+  repo: string;
+  /** Scout type or topic ("infrastructure", "tests", "general"). */
+  area: string;
+  question: string;
+  context: string;
+  /** Suggested answers, one per line. */
+  options: string;
+  status: "open" | "decided" | "withdrawn" | "superseded";
+  /** The operator's decision text (decided/superseded rows). */
+  decision: string;
+  /** Who asked: a scout type, or "operator" for decisions the operator wrote directly. */
+  asked_by: string;
+  run_id: number | null;
+  /** Bumped on every edit of an open question; an answer names the version it answers. */
+  version: number;
+  superseded_by: number | null;
+  created_at: string;
+  updated_at: string;
+  decided_at: string | null;
 }
 
 export type NoticedKind = "bug" | "failing-check" | "tech-debt" | "docs" | "security" | "idea" | "other";

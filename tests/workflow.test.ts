@@ -4,7 +4,7 @@ import type { Ticket } from "../src/core/types";
 
 const ticket: Ticket = {
   id: 7, repo: "web", title: "Fix nav", body: "The nav overlaps on mobile.", status: "todo",
-  source: "local", external_id: null, created_at: "", updated_at: "",
+  source: "local", external_id: null, confidence: null, decision_id: null, noticed_id: null, created_at: "", updated_at: "",
 };
 
 test("parses front matter and template", () => {
@@ -60,6 +60,6 @@ test("an acutis.db from before session_cost opens and gains the column", async (
     INSERT INTO runs (ticket_id, repo, state, cost_usd) VALUES (1, 'r', 'paused', 0.4);`);
   old.close();
   const store = new Store(path);
-  expect(store.getRun(1)).toMatchObject({ state: "paused", cost_usd: 0.4, session_cost: null });
+  expect(store.getRun(1)).toMatchObject({ state: "paused", cost_usd: 0.4, session_cost: null, kind: "work", scout: null });
   expect(store.updateRun(1, { state: "queued", session_cost: 0.4 })).toMatchObject({ state: "queued", session_cost: 0.4 });
 });

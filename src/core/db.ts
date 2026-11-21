@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
+import type { Decision, Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS repos (
@@ -63,6 +63,24 @@ CREATE TABLE IF NOT EXISTS noticed (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+CREATE TABLE IF NOT EXISTS decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  area TEXT NOT NULL DEFAULT 'general',
+  question TEXT NOT NULL DEFAULT '',
+  question_key TEXT NOT NULL DEFAULT '',
+  context TEXT NOT NULL DEFAULT '',
+  options TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  decision TEXT NOT NULL DEFAULT '',
+  asked_by TEXT NOT NULL,
+  run_id INTEGER,
+  version INTEGER NOT NULL DEFAULT 1,
+  superseded_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  decided_at TEXT
+);
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS runs_ticket ON runs(ticket_id);
 `;
@@ -84,6 +102,11 @@ export class Store {
       this.db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
     if (!has("repos", "notes")) this.db.exec("ALTER TABLE repos ADD COLUMN notes TEXT NOT NULL DEFAULT ''");
     if (!has("runs", "session_cost")) this.db.exec("ALTER TABLE runs ADD COLUMN session_cost REAL");
+    if (!has("runs", "kind")) this.db.exec("ALTER TABLE runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'work'");
+    if (!has("runs", "scout")) this.db.exec("ALTER TABLE runs ADD COLUMN scout TEXT");
+    if (!has("tickets", "confidence")) this.db.exec("ALTER TABLE tickets ADD COLUMN confidence TEXT");
+    if (!has("tickets", "decision_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN decision_id INTEGER");
+    if (!has("tickets", "noticed_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN noticed_id INTEGER");
   }
 
   // ---- repos
@@ -105,12 +128,12 @@ export class Store {
   }
 
   // ---- runs
-  createRun(r: { ticket_id: number; repo: string; state: RunState }): Run {
+  createRun(r: { ticket_id: number; repo: string; state: RunState; kind?: Run["kind"]; scout?: string | null }): Run {
     const row = this.db
       .query<{ id: number }, any>(
-        "INSERT INTO runs (ticket_id, repo, state) VALUES ($ticket_id, $repo, $state) RETURNING id",
+        "INSERT INTO runs (ticket_id, repo, state, kind, scout) VALUES ($ticket_id, $repo, $state, $kind, $scout) RETURNING id",
       )
-      .get(r)!;
+      .get({ ...r, kind: r.kind ?? "work", scout: r.scout ?? null })!;
     return this.getRun(row.id)!;
   }
   getRun(id: number): Run | null {
@@ -175,6 +198,87 @@ export class Store {
       .query("UPDATE noticed SET status = ?, ticket_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
       .run(patch.status, patch.ticket_id ?? null, id);
     return this.getNoticed(id)!;
+  }
+
+  // ---- decisions
+  /** Normalised text for matching duplicate questions. */
+  static key(text: string): string {
+    return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  }
+  addDecision(d: {
+    repo: string;
+    area: string;
+    question: string;
+    context?: string;
+    options?: string;
+    status?: Decision["status"];
+    decision?: string;
+    asked_by: string;
+    run_id?: number | null;
+  }): Decision {
+    const decided = d.status === "decided";
+    const row = this.db
+      .query<{ id: number }, any>(
+        `INSERT INTO decisions (repo, area, question, question_key, context, options, status, decision, asked_by, run_id, decided_at)
+         VALUES ($repo, $area, $question, $key, $context, $options, $status, $decision, $asked_by, $run_id,
+                 CASE WHEN $decided THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') END) RETURNING id`,
+      )
+      .get({
+        repo: d.repo,
+        area: d.area,
+        question: d.question,
+        key: Store.key(d.question),
+        context: d.context ?? "",
+        options: d.options ?? "",
+        status: d.status ?? "open",
+        decision: d.decision ?? "",
+        asked_by: d.asked_by,
+        run_id: d.run_id ?? null,
+        decided: decided ? 1 : 0,
+      })!;
+    return this.getDecision(row.id)!;
+  }
+  getDecision(id: number): Decision | null {
+    return this.db.query<Decision, [number]>("SELECT * FROM decisions WHERE id = ?").get(id);
+  }
+  listDecisions(filter: { repo?: string; status?: Decision["status"] } = {}): Decision[] {
+    return this.db
+      .query<Decision, any>(
+        `SELECT * FROM decisions WHERE ($repo IS NULL OR repo = $repo) AND ($status IS NULL OR status = $status) ORDER BY id DESC LIMIT 500`,
+      )
+      .all({ repo: filter.repo ?? null, status: filter.status ?? null });
+  }
+  /** The latest open or decided decision with the same normalised question in a repo. */
+  findDecisionByQuestion(repo: string, question: string): Decision | null {
+    return this.db
+      .query<Decision, [string, string]>(
+        "SELECT * FROM decisions WHERE repo = ? AND question_key = ? AND status IN ('open', 'decided') ORDER BY id DESC LIMIT 1",
+      )
+      .get(repo, Store.key(question));
+  }
+  updateDecision(id: number, patch: Partial<Pick<Decision, "question" | "context" | "options" | "status" | "decision" | "superseded_by">> & { bump?: boolean; decided?: boolean }): Decision {
+    const cur = this.getDecision(id)!;
+    const next = { ...cur, ...patch };
+    this.db
+      .query(
+        `UPDATE decisions SET question = $question, question_key = $key, context = $context, options = $options, status = $status,
+           decision = $decision, superseded_by = $superseded_by, version = version + $bump,
+           decided_at = CASE WHEN $decided THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE decided_at END,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = $id`,
+      )
+      .run({
+        id,
+        question: next.question,
+        key: Store.key(next.question),
+        context: next.context,
+        options: next.options,
+        status: next.status,
+        decision: next.decision,
+        superseded_by: next.superseded_by,
+        bump: patch.bump ? 1 : 0,
+        decided: patch.decided ? 1 : 0,
+      });
+    return this.getDecision(id)!;
   }
 
   /** The data of a run's latest event of one kind (one query, not the whole log). */

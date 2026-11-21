@@ -30,7 +30,7 @@ export interface Chunk {
 
 export interface LibraryHit {
   id: string;
-  kind: "doc" | "run";
+  kind: "doc" | "run" | "decision";
   ref: string;
   line: number;
   heading: string;
@@ -202,13 +202,24 @@ export class Library {
     })();
   }
 
+  /** Replace the repo's decisions (operator-written; few, and they change when superseded). */
+  setDecisions(repo: string, decisions: { id: number; question: string; decision: string }[]) {
+    const insert = this.db.query(
+      "INSERT INTO library (heading, body, repo, commit_id, kind, ref, line) VALUES (?, ?, ?, '', 'decision', ?, 0)",
+    );
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM library WHERE repo = ? AND kind = 'decision'").run(repo);
+      for (const d of decisions) insert.run(d.question || "Operator decision", d.decision, repo, `decision #${d.id}`);
+    })();
+  }
+
   search(repo: string, commit: string | null, query: string, limit: number): LibraryHit[] {
     const q = ftsQuery(query);
     if (!q) return [];
     return this.db
-      .query<{ rowid: number; kind: "doc" | "run"; ref: string; line: number; heading: string; snip: string }, any[]>(
+      .query<{ rowid: number; kind: LibraryHit["kind"]; ref: string; line: number; heading: string; snip: string }, any[]>(
         `SELECT rowid, kind, ref, line, heading, snippet(library, 1, '', '', '…', 32) AS snip
-         FROM library WHERE library MATCH ? AND repo = ? AND (commit_id = ? OR kind = 'run')
+         FROM library WHERE library MATCH ? AND repo = ? AND (commit_id = ? OR kind IN ('run', 'decision'))
          ORDER BY bm25(library, 4.0, 1.0) LIMIT ?`,
       )
       .all(q, repo, commit ?? "", Math.max(1, Math.min(10, limit)))
@@ -233,7 +244,8 @@ export function formatHits(hits: LibraryHit[], header: string): string {
   let used = header.length;
   let shown = 0;
   for (const h of hits) {
-    const where = h.kind === "doc" ? `${h.ref}:${h.line}` : `${h.ref} (landed; summary written by its worker)`;
+    const where =
+      h.kind === "doc" ? `${h.ref}:${h.line}` : h.kind === "decision" ? `${h.ref} (the operator's decision)` : `${h.ref} (landed; summary written by its worker)`;
     const block = `\n[${h.id}] ${where}${h.heading ? ` · ${h.heading}` : ""}\n  ${h.snippet.replace(/\s+/g, " ").trim()}`;
     if (used + block.length > SEARCH_BUDGET_CHARS) break;
     out.push(block);

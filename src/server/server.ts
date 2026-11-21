@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from "bun";
 import type { App } from "../app";
 import { RunError } from "../core/runs";
+import { SCOUT_TYPES, isRunnerTicket } from "../core/scouts";
 import { tokenMatches } from "../core/token";
 import dashboard from "../dashboard/index.html";
 
@@ -76,6 +77,7 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
           sandboxReason: app.sandboxStatus.reason ?? null,
           runner: app.runner.name,
           maxRuns: cfg.maxRuns ?? 0,
+          scoutTypes: Object.entries(SCOUT_TYPES).map(([id, s]) => ({ id, title: s.title })),
           browser: app.browser.available,
           permissions: runs.allPendingPermissions(),
         })),
@@ -87,6 +89,33 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
           return runs.listNoticed(status === "all" ? undefined : status === "dismissed" || status === "ticketed" ? status : "open");
         }),
       },
+      "/api/repos/:name/scouts/:type": { POST: api((req) => runs.startScout(req.params.name!, req.params.type!)) },
+      "/api/decisions": {
+        GET: api((req) => {
+          const q = new URL(req.url).searchParams;
+          const repo = q.get("repo") ?? undefined;
+          const status = q.get("status");
+          // Open questions come ranked (most held work first) with their held tickets.
+          if (!status || status === "open") return runs.rankedDecisions(repo);
+          return runs.listDecisions(repo, status === "all" ? undefined : (status as any));
+        }),
+        POST: api(async (req) => {
+          const b = await body(req);
+          return runs.addDecision(String(b.repo ?? ""), String(b.decision ?? ""), b.area ? String(b.area) : undefined);
+        }),
+      },
+      "/api/decisions/:id/decide": {
+        POST: api(async (req) => {
+          const b = await body(req);
+          return runs.decide(Number(req.params.id), { decision: String(b.decision ?? ""), version: Number(b.version), keep: Array.isArray(b.keep) ? b.keep : [] });
+        }),
+      },
+      "/api/decisions/:id/withdraw": { POST: api((req) => runs.withdrawDecision(Number(req.params.id))) },
+      "/api/decisions/:id/supersede": {
+        POST: api(async (req) => runs.supersedeDecision(Number(req.params.id), String((await body(req)).decision ?? ""))),
+      },
+      "/api/tickets/:id/accept": { POST: api((req) => runs.acceptTicket(Number(req.params.id))) },
+      "/api/tickets/:id/reject": { POST: api((req) => runs.rejectTicket(Number(req.params.id))) },
       "/api/noticed/:id/dismiss": { POST: api((req) => runs.dismissNoticed(Number(req.params.id))) },
       "/api/noticed/:id/ticket": { POST: api((req) => runs.ticketFromNoticed(Number(req.params.id))) },
       "/api/repos/:name": {
@@ -120,7 +149,8 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
         POST: api((req) => {
           const t = tickets.get(Number(req.params.id));
           if (!t) throw new RunError("not found", 404);
-          if (t.status !== "todo") throw new RunError(`ticket is ${t.status}`, 409);
+          if (isRunnerTicket(t)) throw new RunError("that's a scout's own ticket; turn the scout off in the workflow instead", 409);
+          if (t.status !== "todo" && t.status !== "proposed" && t.status !== "held") throw new RunError(`ticket is ${t.status}`, 409);
           const out = tickets.setStatus(t.id, "cancelled");
           hub.ticket(out);
           return out;

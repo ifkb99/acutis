@@ -120,6 +120,22 @@ describe("end to end", () => {
       expect(app.store.getNoticed(noticed.id)).toMatchObject({ status: "ticketed" });
     }, 60000);
 
+    test.skipIf(!chrome)("the Decisions panel answers a scout's question: an option starts the text, held tickets kept go to todo (headless Chrome)", async () => {
+      const q = app.store.addDecision({ repo: "e2e", area: "tests", question: "Do we support phones?", options: "Yes, from 390px\nDesktop only", asked_by: "tests" });
+      const held = app.tickets.create({ repo: "e2e", title: "Phone nav", body: "b", source: "scout:tests", status: "held", decision_id: q.id });
+      const r = await browser.check({
+        url: `${dash}/#token=${app.token}`,
+        steps: "waitfor .decision-item\nclick .decision-item .row.wrap .btn\nclick .decision-item .btn.primary\nwait 1200",
+        script: `JSON.stringify({ open: !!document.querySelector('.decision-item'), todo: [...document.querySelectorAll('.card')].some((c) => c.textContent.includes('Phone nav') && c.textContent.includes('Start')) })`,
+        width: 1300,
+        height: 900,
+      });
+      expect(r.failure).toBeUndefined();
+      expect(JSON.parse(r.scriptResult!)).toEqual({ open: false, todo: true });
+      expect(app.store.getDecision(q.id)).toMatchObject({ status: "decided", decision: "Yes, from 390px" });
+      expect(app.tickets.get(held.id)!.status).toBe("todo");
+    }, 60000);
+
     test.skipIf(!chrome)("without the token the dashboard asks for the link; pasting it into the open tab signs in (headless Chrome)", async () => {
       // Each check is a fresh Chrome profile, so nothing is in localStorage yet.
       const r = await browser.check({
