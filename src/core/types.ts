@@ -218,13 +218,17 @@ export interface BrowserProvider {
 
 /**
  * Confines commands that execute worker-written code (gates, the preview server) the way the
- * agent's own Bash is confined: the workspace is the only writable path and Acutis's own data
- * is hidden. `network: "none"` also gives the command an empty network namespace; the preview
- * keeps the host network so the checking browser can reach it.
+ * agent's own Bash is confined: the workspace is the only writable path, Acutis's own data is
+ * hidden, and the command gets an empty network namespace, so it can reach neither the internet
+ * nor anything on the host's localhost (the Acutis API included).
  */
 export interface CommandSandbox {
-  /** argv that runs `command` (a `sh -c` string) in `cwd`, confined. */
-  wrap(command: string, cwd: string, opts: { network: "none" | "host" }): string[];
+  /**
+   * argv that runs `command` (a `sh -c` string) in `cwd`, confined. With `expose`, connections to
+   * the Unix socket `expose.socket` (created by the sandbox) reach 127.0.0.1:`expose.port` inside
+   * it. That is how the preview server is served to the host without sharing its network.
+   */
+  wrap(command: string, cwd: string, opts?: { expose?: { port: number; socket: string } }): string[];
 }
 
 // ---- Workflow / policy -------------------------------------------------------

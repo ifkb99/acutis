@@ -184,8 +184,17 @@ There are two separate questions: where the agent loop runs, and where the app r
     is available Acutis runs them in its own bubblewrap wrapper
     (`CommandSandbox`, `providers/sandbox/bwrap.ts`): read-only root, the
     workspace writable, a private `/tmp` and PID namespace, Acutis's data dir
-    and credential directories hidden. Gates also get no network at all; the
-    preview keeps the host network so the checking browser can reach it.
+    and credential directories hidden, and an empty network namespace. The
+    preview's port is bridged out: socat inside the sandbox listens on a Unix
+    socket (under `$XDG_RUNTIME_DIR`, outside the workspace) and connects to the
+    server's loopback port, and a host-side socat relays 127.0.0.1:port to that
+    socket. So the preview can't reach the Acutis API, other TCP services on
+    localhost or the internet; a dev server that needs the internet won't get it.
+  - **Open (found 2026-11-21): host Unix sockets are reachable from gates and
+    previews.** A network namespace doesn't cover path sockets. From inside
+    `BwrapSandbox`, `/run/user/$UID/bus` (so `systemd-run --user` starts a
+    process outside the sandbox) and `/var/run/docker.sock` both accept
+    connections. That escapes the filesystem, network and token protections.
     Both get the daemon's environment minus credential-looking variables
     (`workerEnv`), sandbox or not. `setup:` steps run on the host: they are
     trunk policy, run before the worker has touched anything, and usually
@@ -308,12 +317,17 @@ The dashboard lists runs grouped by state. Each run shows:
   `Fetch` interception; new targets are auto-attached paused, and popups are closed), so the
   browser tool can't be used to drive the dashboard on 127.0.0.1:7777. WebSocket handshakes are
   not intercepted; the dashboard's `/ws` refuses foreign origins and is receive-only. This covers
-  the browser tool only: any local process can call the API with the `x-acutis` header (the CLI
-  relies on that), so with the sandbox off, code run by an allowlisted command such as `bun test`
-  could still approve a run. With the sandbox on, the agent's commands and gates can't reach
-  localhost; the preview server still can (it shares the host network). Without these, a worker picked up the
-  owner's claude.ai connectors a few seconds into the session (verified
-  2026-11-19).
+  the browser tool only. Without the MCP restrictions, a worker picked up the owner's claude.ai
+  connectors a few seconds into the session (verified 2026-11-19).
+- **The API needs a token.** Every `/api` and `/ws` request carries the daemon's token
+  (`$ACUTIS_HOME/token`, 0600, persisted): the CLI reads the file, and the dashboard gets it once
+  from the link `acutis serve` prints (`#token=…`) and keeps it in `localStorage`, which is scoped
+  per port. It is not a cookie: cookies ignore the port, so the browser would send one to the
+  worker-written preview on "Open preview". Gates and previews run with `$ACUTIS_HOME` hidden, the
+  agent's file tools and sandbox (`filesystem.denyRead`, `Read(//…)`) are set to deny the token
+  file (not yet checked with a real agent), and the token never goes into the environment. **Limit:** with the sandbox off, worker code runs as you and can read the file
+  without naming it (`bun test` running a test that opens it), so there the token raises the bar
+  but is not a boundary.
 - There is no blanket `Read` allow. Reads inside the workspace are automatic,
   reads outside ask the operator, and credential paths (`~/.ssh`, `~/.aws`,
   gh, Claude credentials…) are hard-denied. Verified with a real-agent probe

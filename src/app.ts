@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { Store } from "./core/db";
 import { Hub } from "./core/hub";
 import { RunManager } from "./core/runs";
+import { ensureToken, tokenPath } from "./core/token";
 import type { AgentRunner, BrowserProvider, CommandSandbox } from "./core/types";
 import { ClaudeSdkRunner, probeSandbox } from "./providers/agent/claude-sdk";
 import { ChromeBrowser } from "./providers/browser/chrome";
@@ -28,12 +29,13 @@ export function createApp(cfg: Config, opts: { runner?: AgentRunner; browser?: B
   const workspaces = new JjWorkspaceProvider(`${cfg.home}/workspaces`);
   const sandboxStatus = opts.runner ? { ok: false, reason: "test runner" } : probeSandbox();
   const sandbox = sandboxStatus.ok;
-  const runner = opts.runner ?? new ClaudeSdkRunner({ sandbox });
+  const token = ensureToken(cfg.home);
+  const runner = opts.runner ?? new ClaudeSdkRunner({ sandbox, denyRead: [tokenPath(cfg.home)] });
   const browser = opts.browser ?? new ChromeBrowser();
   // Gates and previews run worker-written code: confine them whenever the agent itself is sandboxed.
   const commandSandbox = opts.commandSandbox ?? (sandbox ? new BwrapSandbox({ hide: [cfg.home] }) : undefined);
   const runs = new RunManager({ store, hub, tickets, workspaces, runner, browser, artifactsDir: `${cfg.home}/artifacts`, commandSandbox });
-  return { cfg, store, hub, tickets, workspaces, runner, runs, browser, sandbox, sandboxStatus };
+  return { cfg, store, hub, tickets, workspaces, runner, runs, browser, sandbox, sandboxStatus, token };
 }
 
 export type App = ReturnType<typeof createApp>;

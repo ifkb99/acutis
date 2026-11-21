@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { workerEnv } from "../src/core/env";
 import { probeSandbox } from "../src/providers/agent/claude-sdk";
+import { findChrome } from "../src/providers/browser/chrome";
 import { BwrapSandbox } from "../src/providers/sandbox/bwrap";
 import { tempDir } from "./helpers";
 
@@ -28,8 +29,8 @@ describe.skipIf(!usable)("BwrapSandbox (real bubblewrap)", () => {
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("api") });
   afterAll(() => server.stop(true));
 
-  async function run(cmd: string, network: "none" | "host" = "none") {
-    const p = Bun.spawn(sb.wrap(cmd, ws, { network }), { cwd: ws, stdout: "pipe", stderr: "pipe" });
+  async function run(cmd: string) {
+    const p = Bun.spawn(sb.wrap(cmd, ws), { cwd: ws, stdout: "pipe", stderr: "pipe" });
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     return { code: await p.exited, out: out.trim(), err: err.trim() };
   }
@@ -52,16 +53,46 @@ describe.skipIf(!usable)("BwrapSandbox (real bubblewrap)", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  test('network "none" cannot reach localhost services (e.g. the Acutis API); "host" can', async () => {
+  test("confined commands cannot reach localhost services (e.g. the Acutis API)", async () => {
     const url = `http://127.0.0.1:${server.port}/`;
     const fetchCmd = `bun -e 'fetch(${JSON.stringify(url)}).then(r => r.text()).then(t => console.log(t), () => console.log("unreachable"))'`;
-    expect((await run(fetchCmd, "none")).out).toBe("unreachable");
-    expect((await run(fetchCmd, "host")).out).toBe("api");
+    expect((await run(fetchCmd)).out).toBe("unreachable");
+    // Positive control: the same command on the host reaches the stand-in API.
+    expect(Bun.spawnSync(["sh", "-c", fetchCmd]).stdout.toString().trim()).toBe("api");
   });
+
+  test("the preview is served to the host through its own network namespace", async () => {
+    const { PreviewManager } = await import("../src/core/preview");
+    const api = `http://127.0.0.1:${server.port}/`;
+    writeFileSync(
+      `${ws}/preview.ts`,
+      `const big = "0123456789abcdef".repeat(1 << 19); // 8 MiB, to catch a relay that drops writes
+      Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.PORT), async fetch(req) {
+        const path = new URL(req.url).pathname;
+        if (path === "/big") return new Response(big);
+        if (path === "/probe") return fetch(${JSON.stringify(api)}).then(() => new Response("api reached"), () => new Response("api unreachable"));
+        return new Response("preview ok");
+      } });`,
+    );
+    const previews = new PreviewManager(sb);
+    let origin = "";
+    try {
+      ({ origin } = await previews.ensure(1, ws, { run: "bun preview.ts", path: "/", ready_timeout_s: 20 }));
+      expect(await (await fetch(origin + "/")).text()).toBe("preview ok");
+      expect(await (await fetch(origin + "/probe")).text()).toBe("api unreachable");
+      const [a, b] = await Promise.all([fetch(origin + "/big").then((r) => r.text()), fetch(origin + "/big").then((r) => r.text())]);
+      expect(a.length).toBe(8 << 20);
+      expect(a === "0123456789abcdef".repeat(1 << 19) && b === a).toBe(true);
+    } finally {
+      previews.stopAll();
+    }
+    // Stopping takes the host-side relay down too.
+    expect(await fetch(origin + "/").then(() => "up", () => "down")).toBe("down");
+  }, 30000);
 
   test("killing the process group takes everything inside the sandbox", async () => {
     const tag = `30${process.pid % 1000}.5`; // a sleep duration unique to this test, to find it on the host
-    const p = Bun.spawn(sb.wrap(`sleep ${tag} & sleep ${tag} & wait`, ws, { network: "none" }), { cwd: ws });
+    const p = Bun.spawn(sb.wrap(`sleep ${tag} & sleep ${tag} & wait`, ws), { cwd: ws });
     const alive = () => Bun.spawnSync(["pgrep", "-f", `^sleep ${tag}$`]).stdout.toString().trim().split("\n").filter(Boolean).length;
     for (let i = 0; i < 20 && alive() < 2; i++) await Bun.sleep(100);
     expect(alive()).toBe(2);
@@ -116,6 +147,44 @@ describe.skipIf(!usable)("gates run worker-written code inside the sandbox", () 
       api.stop(true);
     }
   }, 30000);
+
+  test.skipIf(!findChrome())("a browser gate reaches the sandboxed preview through the relay; the preview can't reach the API (headless Chrome)", async () => {
+    const { createApp } = await import("../src/app");
+    const { FakeRunner, makeRepo, waitFor } = await import("./helpers");
+    let apiHits = 0;
+    const api = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => (apiHits++, new Response("approved")) });
+    // The dev server probes the stand-in API from the server side and reports it in the page title;
+    // a 4 MiB script checks the relay passes large responses intact.
+    const serve = `
+      const big = "window.bigLen = " + JSON.stringify("x".repeat(4 << 20)) + ".length;";
+      Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.PORT), async fetch(req) {
+        if (new URL(req.url).pathname === "/big.js") return new Response(big, { headers: { "content-type": "text/javascript" } });
+        const probe = await fetch("http://127.0.0.1:${api.port}/api/runs/1/approve", { method: "POST" }).then(() => "api reached", () => "api unreachable");
+        return new Response("<!doctype html><title>" + probe + "</title><script src=/big.js></script>", { headers: { "content-type": "text/html" } });
+      } });`;
+    const workflow = "---\npreview: bun serve.ts\ngates:\n  - browser: { path: /, script: \"document.title === 'api unreachable' && window.bigLen === 4194304\" }\nmax_attempts: 1\n---\n";
+    const repoPath = await makeRepo({ "serve.ts": serve, ".acutis/workflow.md": workflow });
+    const home = tempDir("acutis-home-");
+    const runner = new FakeRunner([
+      async (c) => {
+        c.result("success");
+        await c.nextMessage();
+      },
+    ]);
+    const app = createApp({ home, port: 0 }, { runner, commandSandbox: new BwrapSandbox({ hide: [home] }) });
+    try {
+      app.store.addRepo({ name: "demo", path: repoPath, base: "main" });
+      const t = app.tickets.create({ repo: "demo", title: "t", body: "b" });
+      const run = await app.runs.start(t.id);
+      await waitFor(() => app.store.events(run.id).some((e) => e.kind === "gate.result"), 40000);
+      const gate = app.store.events(run.id).find((e) => e.kind === "gate.result")!.data as any;
+      expect({ ok: gate.ok, output: gate.ok ? "" : gate.output }).toEqual({ ok: true, output: "" });
+      expect(apiHits).toBe(0);
+    } finally {
+      app.runs.shutdown();
+      api.stop(true);
+    }
+  }, 60000);
 });
 
 test("sandbox placeholder files never reach the diff, but tracked empty read-only files stay", async () => {

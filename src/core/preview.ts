@@ -1,4 +1,7 @@
 import type { Subprocess } from "bun";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { workerEnv } from "./env";
 import type { CommandSandbox, PreviewSpec } from "./types";
 
@@ -6,6 +9,9 @@ const LOG_LINES = 200;
 
 interface Preview {
   proc: Subprocess;
+  /** Host side of a sandboxed preview: socat from 127.0.0.1:port to the sandbox's socket. */
+  relay?: Subprocess;
+  socketDir?: string;
   port: number;
   origin: string;
   cwd: string;
@@ -38,7 +44,11 @@ export class PreviewManager {
   /** Starts in flight, so concurrent callers (e.g. two browser checks at once) share one server. */
   private starting = new Map<number, Promise<Preview>>();
 
-  /** With a sandbox, the dev server (worker-written code) can only write its workspace. */
+  /**
+   * With a sandbox, the dev server (worker-written code) can only write its workspace and has
+   * its own network namespace: it can't reach the host's localhost (the Acutis API, your other
+   * dev servers) or the internet. Acutis relays its port to the host.
+   */
   constructor(private sandbox?: CommandSandbox) {}
 
   /** Start the run's preview if it isn't running, and wait until it answers HTTP. */
@@ -69,7 +79,19 @@ export class PreviewManager {
   private async start(runId: number, cwd: string, spec: PreviewSpec): Promise<Preview> {
     const port = await freePort();
     const origin = `http://127.0.0.1:${port}`;
-    const argv = this.sandbox ? this.sandbox.wrap(spec.run, cwd, { network: "host" }) : ["setsid", "sh", "-c", spec.run];
+    let relay: Subprocess | undefined;
+    let socketDir: string | undefined;
+    let argv = ["setsid", "sh", "-c", spec.run];
+    if (this.sandbox) {
+      // Unix socket paths are capped at ~108 bytes, so keep this short (not under $ACUTIS_HOME).
+      socketDir = mkdtempSync(join(process.env.XDG_RUNTIME_DIR || tmpdir(), "acutis-pv-"));
+      const socket = join(socketDir, "s");
+      argv = this.sandbox.wrap(spec.run, cwd, { expose: { port, socket } });
+      relay = Bun.spawn(
+        ["setsid", "socat", `TCP-LISTEN:${port},bind=127.0.0.1,fork,reuseaddr`, `UNIX-CONNECT:${socket}`],
+        { stdout: "ignore", stderr: "ignore" },
+      );
+    }
     const proc = Bun.spawn(argv, {
       cwd,
       stdout: "pipe",
@@ -91,7 +113,7 @@ export class PreviewManager {
     };
     pump(proc.stdout).catch(() => {});
     pump(proc.stderr).catch(() => {});
-    const p: Preview = { proc, port, origin, cwd, logs, exited: false, ready: Promise.resolve() };
+    const p: Preview = { proc, relay, socketDir, port, origin, cwd, logs, exited: false, ready: Promise.resolve() };
     proc.exited.then(() => (p.exited = true));
     p.ready = (async () => {
       const deadline = Date.now() + spec.ready_timeout_s * 1000;
@@ -127,6 +149,8 @@ export class PreviewManager {
     if (!p) return;
     this.previews.delete(runId);
     if (!p.exited) killGroup(p.proc);
+    if (p.relay) killGroup(p.relay);
+    if (p.socketDir) rmSync(p.socketDir, { recursive: true, force: true });
   }
 
   stopAll() {
