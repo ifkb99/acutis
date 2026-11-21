@@ -25,7 +25,7 @@ import type {
   Workspace,
   WorkspaceProvider,
 } from "./types";
-import { ACTIVE_STATES, TERMINAL_STATES } from "./types";
+import { ACTIVE_STATES, SLOT_STATES, TERMINAL_STATES } from "./types";
 import { WORKFLOW_PATH, defaultWorkflow, describeGate, parseWorkflow, renderTemplate, workerSystemPrompt } from "./workflow";
 
 export class RunError extends Error {
@@ -51,10 +51,15 @@ interface Active {
   permissions: Map<string, PendingPermission>;
   /** The check process currently running, if any. */
   gate: Subprocess | null;
-  /** Last cumulative cost the live session reported (the SDK reports running totals, not deltas). */
+  /** Last running total counted for the session (carried over a resume); null: nothing seen yet. */
   costSeen: number | null;
-  /** Whether the live session was resumed from an earlier one. */
-  resumed: boolean;
+  /** Whether a total has been seen from the current agent process yet. */
+  costObserved: boolean;
+  /** Spend counted since the last turn result. */
+  turnCost: number;
+  /** In-flight cost poll (single-flight) and when the last one started. */
+  costPoll: Promise<void> | null;
+  lastCostPoll: number;
 }
 
 function killGroup(proc: Subprocess) {
@@ -78,16 +83,18 @@ function tail(s: string, n: number): string {
 }
 
 /**
- * Cost to add for one result. `total` is the session's running total; a resumed session usually
- * continues from the total saved in its transcript, but may restart from zero.
+ * Cost to add for one observed running total. `lastSeen` is the last total counted for this
+ * session, carried over a resume (a resumed session continues from the total its transcript saved,
+ * which includes spend after our last look, e.g. a turn cut off by a restart). A total below it
+ * means the count restarted (a resume with no saved total, or /clear), unless it's a poll reply
+ * that a turn result overtook; `first` marks the first total seen from the current agent process.
  */
-export function costDelta(total: number, lastSeen: number | null, resumed: boolean, runCost: number): number {
-  if (lastSeen === null) {
-    if (!resumed) return total;
-    return total >= runCost ? total - runCost : total;
-  }
-  return total >= lastSeen ? total - lastSeen : total;
+export function costDelta(total: number, lastSeen: number | null, opts: { first: boolean; kind: "result" | "poll" }): number {
+  if (lastSeen === null || total >= lastSeen) return total - (lastSeen ?? 0);
+  return opts.first || opts.kind === "result" ? total : 0;
 }
+
+const COST_POLL_TIMEOUT_MS = 2000;
 
 const unavailableBrowser: BrowserProvider = {
   available: false,
@@ -112,6 +119,12 @@ export class RunManager {
       artifactsDir?: string;
       /** Confines gates and the preview server (worker-written code). Absent: they run on the host. */
       commandSandbox?: CommandSandbox;
+      /** Whether workers' own shell is sandboxed (changes what the worker prompt tells them). */
+      agentSandboxed?: boolean;
+      /** Runs that may hold a slot (preparing, running, verifying, landing) at once; new runs queue. 0: no limit. */
+      maxRuns?: number;
+      /** Minimum gap between live cost polls of one session. */
+      costPollMs?: number;
     },
   ) {
     this.browser = deps.browser ?? unavailableBrowser;
@@ -130,6 +143,7 @@ export class RunManager {
         this.setState(run.id, "awaiting_review", "daemon restarted while landing; approve again");
       }
     }
+    this.schedulePump(); // queued runs survive a restart
   }
 
   /** Stop everything this manager started (daemon shutdown). */
@@ -168,11 +182,57 @@ export class RunManager {
     if (!tickets.claim(ticketId)) throw new RunError(`ticket #${ticketId} is not in "todo"`, 409);
     hub.ticket(tickets.get(ticketId)!);
 
-    const run = store.createRun({ ticket_id: ticketId, repo: repo.name, state: "preparing" });
+    // Synchronous from the count to the insert, so two starts can't both take the last slot.
+    const max = this.deps.maxRuns ?? 0;
+    const busy = this.busySlots();
+    const queued = max > 0 && busy >= max;
+    const run = store.createRun({ ticket_id: ticketId, repo: repo.name, state: queued ? "queued" : "preparing" });
     hub.run(run);
-    hub.emit(run.id, "run.state", { from: null, to: "preparing" });
-    this.prepare(run, repo, ticket).catch((e) => this.fail(run.id, e));
+    hub.emit(run.id, "run.state", {
+      from: null,
+      to: run.state,
+      reason: queued ? `${busy} runs active (limit ${max}); starts when one finishes, pauses or reaches review` : undefined,
+    });
+    if (!queued) this.prepare(run, repo, ticket).catch((e) => this.fail(run.id, e));
     return run;
+  }
+
+  /** Runs holding a slot right now (from the store, so runs still preparing count too). */
+  private busySlots(): number {
+    return this.deps.store.listRuns(1000).filter((r) => SLOT_STATES.includes(r.state)).length;
+  }
+
+  private pumpScheduled = false;
+
+  /** Deferred, so a state change never throws a queued run's start-up error into its caller. */
+  private schedulePump() {
+    if (this.pumpScheduled || !this.deps.maxRuns) return;
+    this.pumpScheduled = true;
+    queueMicrotask(() => {
+      this.pumpScheduled = false;
+      this.pump();
+    });
+  }
+
+  /** Start queued runs, oldest first, while slots are free. */
+  private pump() {
+    const max = this.deps.maxRuns ?? 0;
+    if (!max) return;
+    const runs = this.deps.store.listRuns(1000);
+    let busy = runs.filter((r) => SLOT_STATES.includes(r.state)).length;
+    for (const run of runs.filter((r) => r.state === "queued").sort((a, b) => a.id - b.id)) {
+      if (busy >= max) break;
+      busy++;
+      try {
+        const repo = this.deps.store.getRepo(run.repo);
+        const ticket = this.deps.tickets.get(run.ticket_id);
+        if (!repo || !ticket) throw new Error(`can't start: ${!repo ? `repo "${run.repo}"` : `ticket #${run.ticket_id}`} is gone`);
+        this.setState(run.id, "preparing", "a run slot is free");
+        this.prepare(this.mustGet(run.id), repo, ticket).catch((e) => this.fail(run.id, e));
+      } catch (e) {
+        this.fail(run.id, e); // never wedge the queue on one bad run
+      }
+    }
   }
 
   private async loadWorkflow(repo: Repo, commit: string): Promise<Workflow> {
@@ -210,7 +270,10 @@ export class RunManager {
       permissions: new Map(),
       gate: null,
       costSeen: null,
-      resumed: false,
+      costObserved: false,
+      turnCost: 0,
+      costPoll: null,
+      lastCostPoll: 0,
     };
     this.active.set(run.id, a);
 
@@ -243,7 +306,10 @@ export class RunManager {
       permissions: new Map(),
       gate: null,
       costSeen: null,
-      resumed: false,
+      costObserved: false,
+      turnCost: 0,
+      costPoll: null,
+      lastCostPoll: 0,
     };
     this.active.set(runId, a);
     return a;
@@ -257,7 +323,7 @@ export class RunManager {
     const session = this.deps.runner.start({
       cwd: a.ws.path,
       prompt,
-      systemAppend: workerSystemPrompt({ ticket: a.ticket, cwd: a.ws.path, workflow: a.workflow, repo: a.repo }),
+      systemAppend: workerSystemPrompt({ ticket: a.ticket, cwd: a.ws.path, workflow: a.workflow, repo: a.repo, sandboxed: this.deps.agentSandboxed }),
       model: a.workflow.model,
       effort: a.workflow.effort,
       allow: a.workflow.allow,
@@ -268,8 +334,14 @@ export class RunManager {
     });
     a.session = session;
     a.intent = null;
-    a.costSeen = null;
-    a.resumed = Boolean(resumeSessionId);
+    // A fresh session counts from zero; a resumed one continues from its saved total, so compare
+    // with what was counted for it (session_cost; older rows only have the run's own total).
+    a.costSeen = resumeSessionId ? (run.session_cost ?? run.cost_usd) : null;
+    a.costObserved = false;
+    a.turnCost = 0;
+    a.costPoll = null;
+    a.lastCostPoll = 0;
+    if (!resumeSessionId) this.deps.store.updateRun(runId, { session_cost: null });
     if (this.deps.tickets.get(run.ticket_id)?.status !== "in_progress") {
       this.deps.hub.ticket(this.deps.tickets.setStatus(run.ticket_id, "in_progress"));
     }
@@ -283,17 +355,28 @@ export class RunManager {
       const a = this.active.get(runId);
       if (!a || a.session !== session) return; // superseded or killed
       switch (ev.kind) {
-        case "agent.init":
+        case "agent.init": {
           hub.run(store.updateRun(runId, { session_id: ev.session_id, model: ev.model }));
           hub.emit(runId, ev.kind, { ...ev });
+          // A resumed session's first total includes spend we never saw (a turn cut off by a
+          // restart). Look right away, before this turn adds to it, so it can be reported.
+          if (a.costSeen !== null) {
+            const before = this.mustGet(runId).cost_usd;
+            this.pollCost(runId, a, session, true).then(() => {
+              const recovered = this.mustGet(runId).cost_usd - before;
+              if (recovered >= 0.005) {
+                hub.emit(runId, "system.log", { msg: `≈$${recovered.toFixed(3)} spent in an earlier, interrupted turn is now counted` });
+              }
+            });
+          }
           break;
+        }
         case "agent.result": {
-          const run = this.mustGet(runId);
-          const delta = costDelta(ev.cost_usd, a.costSeen, a.resumed, run.cost_usd);
-          a.costSeen = ev.cost_usd;
+          this.applyCost(runId, a, ev.cost_usd, "result");
+          const turnCost = a.turnCost;
+          a.turnCost = 0;
           // cost_usd stays the SDK's running total; turn_cost_usd is what this turn added.
-          hub.emit(runId, ev.kind, { ...ev, turn_cost_usd: delta });
-          hub.run(store.updateRun(runId, { cost_usd: run.cost_usd + delta }));
+          hub.emit(runId, ev.kind, { ...ev, turn_cost_usd: turnCost });
           const intent = a.intent;
           if (intent === "pause") {
             a.intent = null;
@@ -322,8 +405,43 @@ export class RunManager {
         }
         default:
           hub.emit(runId, ev.kind, { ...ev });
+          this.pollCost(runId, a, session);
       }
     }
+  }
+
+  /** Count an observed running total for the live session; returns what it added. */
+  private applyCost(runId: number, a: Active, total: number, kind: "result" | "poll"): number {
+    const first = !a.costObserved;
+    // A poll answered after a newer result reports less than we've counted: ignore it.
+    if (kind === "poll" && !first && a.costSeen !== null && total < a.costSeen) return 0;
+    const delta = costDelta(total, a.costSeen, { first, kind });
+    a.costObserved = true;
+    a.costSeen = total;
+    a.turnCost += delta;
+    const run = this.mustGet(runId);
+    const updated = this.deps.store.updateRun(runId, { cost_usd: run.cost_usd + delta, session_cost: total });
+    if (delta > 0 || kind === "result") this.deps.hub.run(updated);
+    return delta;
+  }
+
+  /**
+   * Live cost: ask the session for its running total, at most every costPollMs (force: now).
+   * Single-flight, capped at a couple of seconds, and dropped if the session was replaced.
+   */
+  private pollCost(runId: number, a: Active, session: AgentSession, force = false): Promise<void> {
+    if (!session.totalCost) return Promise.resolve();
+    if (a.costPoll) return a.costPoll;
+    if (!force && Date.now() - a.lastCostPoll < (this.deps.costPollMs ?? 5000)) return Promise.resolve();
+    a.lastCostPoll = Date.now();
+    const timeout = new Promise<null>((r) => setTimeout(() => r(null), COST_POLL_TIMEOUT_MS));
+    a.costPoll = Promise.race([session.totalCost().catch(() => null), timeout])
+      .then((total) => {
+        if (total === null || a.session !== session || !this.deps.store.getRun(runId)) return;
+        this.applyCost(runId, a, total, "poll");
+      })
+      .finally(() => (a.costPoll = null));
+    return a.costPoll;
   }
 
   private closeSession(a: Active) {
@@ -621,7 +739,7 @@ export class RunManager {
   async message(runId: number, text: string, mode: "message" | "redirect" = "message") {
     if (!text.trim()) throw new RunError("message is empty");
     const run = this.mustGet(runId);
-    if (run.state === "verifying" || run.state === "landing" || run.state === "preparing") {
+    if (run.state === "verifying" || run.state === "landing" || run.state === "preparing" || run.state === "queued") {
       throw new RunError(`wait: run is ${run.state}`, 409);
     }
     if (run.state === "done" || run.state === "cancelled") throw new RunError(`run is ${run.state}`, 409);
@@ -661,15 +779,19 @@ export class RunManager {
     if (run.state === "landing") throw new RunError("run is landing; wait for it to finish", 409);
     const a = this.active.get(runId);
     if (a) {
+      if (a.intent === "kill") return; // a kill is already capturing the turn's cost
+      if (a.gate) killGroup(a.gate);
       if (a.session) {
         a.intent = "kill";
-        a.session.close();
+        this.denyPending(a, "run killed");
+        // A killed turn never reports a result, so read its spend before closing (capped wait).
+        await this.pollCost(runId, a, a.session, true);
+        a.session?.close();
         a.session = null;
       }
       this.denyPending(a, "run killed");
-      if (a.gate) killGroup(a.gate);
     }
-    this.setState(runId, "cancelled", "killed by operator; workspace kept until discarded");
+    this.setState(runId, "cancelled", run.state === "queued" ? "removed from the queue" : "killed by operator; workspace kept until discarded");
     this.releaseTicket(run.ticket_id);
   }
 
@@ -813,6 +935,8 @@ export class RunManager {
     if (TERMINAL_STATES.includes(to)) this.previews.stop(runId);
     this.deps.hub.emit(runId, "run.state", { from, to, reason });
     this.deps.hub.run(run);
+    // The one place slots are freed: leaving preparing/running/verifying/landing for anything else.
+    if (SLOT_STATES.includes(from) && !SLOT_STATES.includes(to)) this.schedulePump();
   }
 
   private mustGet(runId: number): Run {

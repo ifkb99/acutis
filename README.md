@@ -81,6 +81,9 @@ Open the link `serve` prints. It carries the API token (`#token=…`, kept in `$
 which every API call needs. `bun src/cli.ts dashboard` prints it again. Then add a ticket in the dashboard (or `bun src/cli.ts ticket add <repo> "Title" --body "..."`)
 and press **Start**.
 
+At most 3 runs work at once (`ACUTIS_MAX_RUNS`; `0` means no limit). Runs you start past that
+queue and start as others finish, pause or reach review.
+
 Everything the dashboard does is also on the CLI (`bun src/cli.ts` lists it), e.g.:
 
 ```sh

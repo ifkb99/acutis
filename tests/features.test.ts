@@ -46,11 +46,15 @@ const writes =
 
 describe("cost accounting", () => {
   test("costDelta treats SDK totals as running totals", () => {
-    expect(costDelta(0.5, null, false, 0)).toBe(0.5); // first result of a fresh session
-    expect(costDelta(0.8, 0.5, false, 0.5)).toBeCloseTo(0.3); // same process, later turn
-    expect(costDelta(1.2, null, true, 0.8)).toBeCloseTo(0.4); // resumed, continues from saved total
-    expect(costDelta(0.1, null, true, 0.8)).toBeCloseTo(0.1); // resumed, total restarted from zero
-    expect(costDelta(0.05, 0.9, false, 0.9)).toBeCloseTo(0.05); // total reset mid-session (/clear)
+    const result = { first: false, kind: "result" as const };
+    const poll = { first: false, kind: "poll" as const };
+    expect(costDelta(0.5, null, { ...result, first: true })).toBe(0.5); // first result of a fresh session
+    expect(costDelta(0.8, 0.5, result)).toBeCloseTo(0.3); // same process, later turn
+    expect(costDelta(0.6, 0.5, poll)).toBeCloseTo(0.1); // mid-turn poll
+    expect(costDelta(1.2, 0.8, { ...poll, first: true })).toBeCloseTo(0.4); // resumed: saved total includes unseen spend
+    expect(costDelta(0.1, 0.8, { ...poll, first: true })).toBeCloseTo(0.1); // resumed, total restarted from zero
+    expect(costDelta(0.05, 0.9, result)).toBeCloseTo(0.05); // total reset mid-session (/clear)
+    expect(costDelta(0.4, 0.9, poll)).toBe(0); // a stale poll reply that a result overtook
   });
 
   test("gate retries and resumes don't double-count", async () => {

@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS runs (
   attempt INTEGER NOT NULL DEFAULT 1,
   gates_ok INTEGER,
   cost_usd REAL NOT NULL DEFAULT 0,
+  session_cost REAL,
   error TEXT,
   bookmark TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
@@ -67,6 +68,7 @@ export class Store {
     const has = (table: string, col: string) =>
       this.db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
     if (!has("repos", "notes")) this.db.exec("ALTER TABLE repos ADD COLUMN notes TEXT NOT NULL DEFAULT ''");
+    if (!has("runs", "session_cost")) this.db.exec("ALTER TABLE runs ADD COLUMN session_cost REAL");
   }
 
   // ---- repos

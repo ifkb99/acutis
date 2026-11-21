@@ -39,6 +39,7 @@ Runs
   acutis preview <run>                         Start the run's preview server and print its URL
 
 Env: ACUTIS_HOME (default ~/.local/share/acutis), ACUTIS_PORT (default 7777),
+     ACUTIS_MAX_RUNS (runs active at once, default 3; 0 = no limit; more queue),
      ACUTIS_NOTIFY=off (no desktop notifications), ACUTIS_NOTIFY_URL (POST notifications, e.g. ntfy),
      ACUTIS_CHROME (browser for previews/checks)`;
 
@@ -127,6 +128,7 @@ async function serve(args: string[]) {
           "  in the dashboard. File-manipulating commands inside the workspace may run without asking, and\n" +
           "  allowlisted commands that run code (bun test, bun run…) can still touch anything: this is not a boundary.",
   );
+  console.log(`Runs at once: ${cfg.maxRuns ? `${cfg.maxRuns} (ACUTIS_MAX_RUNS; more queue)` : "no limit (ACUTIS_MAX_RUNS=0)"}`);
   console.log(`Browser (previews, browser checks): ${app.browser.available ? "found" : "not found; set ACUTIS_CHROME"}`);
   console.log(`Notifications: ${notifier.describe()}`);
 }
@@ -423,7 +425,11 @@ switch (cmd) {
     const { values, positionals } = parseArgs({ args: [sub, ...rest].filter((x): x is string => x !== undefined), allowPositionals: true, options: { watch: { type: "boolean" } } });
     const id = runArg(positionals[0], "acutis start <ticket-id> [--watch]");
     const run = await post(`/api/tickets/${id}/start`);
-    console.log(`Run ${run.id} started for ticket #${id}. Dashboard: ${base}/#run-${run.id}`);
+    console.log(
+      run.state === "queued"
+        ? `Run ${run.id} queued for ticket #${id}: the daemon's run limit is reached (ACUTIS_MAX_RUNS). It starts when a slot frees up.`
+        : `Run ${run.id} started for ticket #${id}. Dashboard: ${base}/#run-${run.id}`,
+    );
     if (values.watch) await watch(run.id, false);
     break;
   }

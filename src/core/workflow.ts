@@ -185,7 +185,7 @@ export function describeGate(g: Gate): string {
   return g.kind === "cmd" ? g.run : `browser check of ${g.path}${g.script ? ` (script: ${g.script})` : ""}`;
 }
 
-export function workerSystemPrompt(opts: { ticket: Ticket; cwd: string; workflow: Workflow; repo?: Repo }): string {
+export function workerSystemPrompt(opts: { ticket: Ticket; cwd: string; workflow: Workflow; repo?: Repo; sandboxed?: boolean }): string {
   const gates = opts.workflow.gates.length
     ? opts.workflow.gates.map((g) => `- \`${describeGate(g)}\``).join("\n")
     : "- (none configured)";
@@ -214,7 +214,12 @@ Rules:
 - Do not start long-running servers, watchers, or background processes. Acutis owns those.
 - Do not edit files under .acutis/ unless the ticket explicitly asks for it.
 - If a tool call is denied, do not try to get around the denial. Find another approach or explain what you need.
-- If the ticket is ambiguous or you are blocked, stop and say exactly what you need instead of guessing.
+- If the ticket is ambiguous or you are blocked, stop and say exactly what you need instead of guessing.${
+    opts.sandboxed
+      ? `
+- Your shell is sandboxed. It can't create or connect to Unix sockets (EPERM), so tools that use socket IPC fail: run TypeScript with \`node --import tsx file.ts\` rather than \`tsx file.ts\`. Reaching a new network host asks the operator. The checks below run in a separate sandbox that allows Unix sockets but has no network at all.`
+      : ""
+  }
 
 When you finish, Acutis runs these checks in the workspace:
 ${gates}

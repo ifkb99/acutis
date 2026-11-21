@@ -75,6 +75,7 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
           sandbox: app.sandbox,
           sandboxReason: app.sandboxStatus.reason ?? null,
           runner: app.runner.name,
+          maxRuns: cfg.maxRuns ?? 0,
           browser: app.browser.available,
           permissions: runs.allPendingPermissions(),
         })),
