@@ -216,6 +216,17 @@ export interface BrowserProvider {
   check(c: BrowserCheck): Promise<BrowserResult>;
 }
 
+/**
+ * Confines commands that execute worker-written code (gates, the preview server) the way the
+ * agent's own Bash is confined: the workspace is the only writable path and Acutis's own data
+ * is hidden. `network: "none"` also gives the command an empty network namespace; the preview
+ * keeps the host network so the checking browser can reach it.
+ */
+export interface CommandSandbox {
+  /** argv that runs `command` (a `sh -c` string) in `cwd`, confined. */
+  wrap(command: string, cwd: string, opts: { network: "none" | "host" }): string[];
+}
+
 // ---- Workflow / policy -------------------------------------------------------
 
 export interface CommandGate {

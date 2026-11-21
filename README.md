@@ -10,8 +10,61 @@ See [DESIGN.md](DESIGN.md) for the architecture and roadmap.
 
 ## Requirements
 
-Bun, jj, and a logged-in Claude Code (`claude auth status`). Optional:
-`bubblewrap` and `socat` turn on the shell sandbox.
+Bun, jj, and a logged-in Claude Code (`claude auth status`). Strongly recommended:
+`bubblewrap` and `socat` for the sandbox (below). Optional: Chrome or Chromium for
+previews and browser checks.
+
+## Sandbox
+
+With the sandbox on, the agent's shell commands, the repo's gates and the preview
+server can write only inside the run's workspace. The agent's internet requests
+become per-host permission requests. Gates get no network at all, so worker-written
+tests can't reach the internet or the Acutis API. Without it, Acutis still runs,
+but its permission checks are guard rails, not a boundary. `acutis serve` prints
+which mode you're in.
+
+On Linux:
+
+1. Install the tools:
+
+   ```sh
+   sudo apt install bubblewrap socat        # Fedora: sudo dnf install bubblewrap socat
+   ```
+
+2. **Ubuntu 23.10+ only:** AppArmor blocks unprivileged user namespaces by default
+   (`sysctl kernel.apparmor_restrict_unprivileged_userns` prints `1`). Let bubblewrap
+   use them with a profile, then load it:
+
+   ```sh
+   sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+   abi <abi/4.0>,
+   include <tunables/global>
+
+   profile bwrap /usr/bin/bwrap flags=(unconfined) {
+     userns,
+
+     include if exists <local/bwrap>
+   }
+   EOF
+   sudo apparmor_parser -r /etc/apparmor.d/bwrap
+   ```
+
+   Run this in a real terminal, because `sudo` needs to prompt for your password.
+   The profile survives reboots. It lets any program use namespaces *through bwrap*,
+   which is the trade-off Ubuntu's default avoids. Turning the restriction off
+   system-wide with `sysctl` is broader, so don't.
+
+3. Check it works, then (re)start the daemon:
+
+   ```sh
+   bwrap --ro-bind / / --dev /dev --unshare-net true && echo ok
+   bun src/cli.ts serve          # should print "Sandbox: on (bubblewrap + socat)"
+   ```
+
+If `serve` prints `Sandbox: OFF (...)`, the reason says which step is missing.
+Under the sandbox, things that need the network or write outside the repo
+(`bun install`, `npm ci`, `cargo fetch`) belong in the workflow's `setup:` steps,
+which run on the host before the agent starts.
 
 ## Quick start
 

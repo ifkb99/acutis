@@ -173,11 +173,23 @@ There are two separate questions: where the agent loop runs, and where the app r
   - The sandbox limits Bash writes to the workspace and temp, and routes
     network through an allowlist proxy.
   - It needs `bubblewrap` and `socat`, and the kernel must allow unprivileged
-    user namespaces. **Finding (2026-11-19):** on this machine Ubuntu's
-    `kernel.apparmor_restrict_unprivileged_userns=1` blocks bubblewrap, so the
-    sandbox is off. Acutis probes for this at startup (`probeSandbox`) and
-    reports the reason, instead of failing every run. To fix it, add the
-    bubblewrap AppArmor profile from the Claude Code sandboxing docs.
+    user namespaces. Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1`
+    blocks bubblewrap until an AppArmor profile for `/usr/bin/bwrap` is added
+    (README, "Sandbox"). Acutis probes for this at startup (`probeSandbox`) and
+    reports the reason, instead of failing every run. **Verified 2026-11-20**
+    (run 4): writes outside the workspace fail, internet hosts become
+    per-host permission requests, and the Acutis API on localhost is unreachable.
+  - **Gates and the preview server run worker-written code** (a test file, a
+    dev server), so Claude Code's sandbox doesn't cover them. When the sandbox
+    is available Acutis runs them in its own bubblewrap wrapper
+    (`CommandSandbox`, `providers/sandbox/bwrap.ts`): read-only root, the
+    workspace writable, a private `/tmp` and PID namespace, Acutis's data dir
+    and credential directories hidden. Gates also get no network at all; the
+    preview keeps the host network so the checking browser can reach it.
+    Both get the daemon's environment minus credential-looking variables
+    (`workerEnv`), sandbox or not. `setup:` steps run on the host: they are
+    trunk policy, run before the worker has touched anything, and usually
+    need the network.
   - The sandbox only wraps shell commands, and it still allows *reads* across
     the machine. Deny-read `~/.ssh`, `~/.aws`, `~/.claude/.credentials.json`
     and other repos.
@@ -289,7 +301,8 @@ The dashboard lists runs grouped by state. Each run shows:
   not intercepted; the dashboard's `/ws` refuses foreign origins and is receive-only. This covers
   the browser tool only: any local process can call the API with the `x-acutis` header (the CLI
   relies on that), so with the sandbox off, code run by an allowlisted command such as `bun test`
-  could still approve a run. Without these, a worker picked up the
+  could still approve a run. With the sandbox on, the agent's commands and gates can't reach
+  localhost; the preview server still can (it shares the host network). Without these, a worker picked up the
   owner's claude.ai connectors a few seconds into the session (verified
   2026-11-19).
 - There is no blanket `Read` allow. Reads inside the workspace are automatic,

@@ -2,6 +2,7 @@ import type { Subprocess } from "bun";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import type { Store } from "./db";
 import type { Hub } from "./hub";
+import { workerEnv } from "./env";
 import { PreviewManager } from "./preview";
 import type {
   AcutisTool,
@@ -10,6 +11,7 @@ import type {
   BrowserGate,
   BrowserProvider,
   CommandGate,
+  CommandSandbox,
   Gate,
   PermissionDecision,
   PermissionRequest,
@@ -95,7 +97,7 @@ const unavailableBrowser: BrowserProvider = {
 export class RunManager {
   private active = new Map<number, Active>();
   private landing = new Map<string, Promise<unknown>>();
-  readonly previews = new PreviewManager();
+  readonly previews: PreviewManager;
   private browser: BrowserProvider;
 
   constructor(
@@ -108,9 +110,12 @@ export class RunManager {
       browser?: BrowserProvider;
       /** Where screenshots and note images are stored. */
       artifactsDir?: string;
+      /** Confines gates and the preview server (worker-written code). Absent: they run on the host. */
+      commandSandbox?: CommandSandbox;
     },
   ) {
     this.browser = deps.browser ?? unavailableBrowser;
+    this.previews = new PreviewManager(deps.commandSandbox);
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -359,11 +364,15 @@ export class RunManager {
     hub.emit(runId, `${phase}.start`, { name: step.name, run: step.run });
     const t0 = Date.now();
     // setsid makes the command its own process group so a kill or timeout takes its children too.
-    const proc = Bun.spawn(["setsid", "sh", "-c", step.run], {
+    // Setup steps are trunk policy run before the worker has touched anything, so they run on the
+    // host (they usually need the network). Gates run worker-written code: confine them.
+    const sandbox = phase === "gate" ? this.deps.commandSandbox : undefined;
+    const argv = sandbox ? sandbox.wrap(step.run, a.ws.path, { network: "none" }) : ["setsid", "sh", "-c", step.run];
+    const proc = Bun.spawn(argv, {
       cwd: a.ws.path,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, CI: "1" },
+      env: phase === "gate" ? workerEnv({ CI: "1" }) : { ...process.env, CI: "1" },
     });
     a.gate = proc;
     const timer = setTimeout(() => killGroup(proc), (step.timeout_s ?? 600) * 1000);

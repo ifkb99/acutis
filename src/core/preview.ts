@@ -1,5 +1,6 @@
 import type { Subprocess } from "bun";
-import type { PreviewSpec } from "./types";
+import { workerEnv } from "./env";
+import type { CommandSandbox, PreviewSpec } from "./types";
 
 const LOG_LINES = 200;
 
@@ -37,6 +38,9 @@ export class PreviewManager {
   /** Starts in flight, so concurrent callers (e.g. two browser checks at once) share one server. */
   private starting = new Map<number, Promise<Preview>>();
 
+  /** With a sandbox, the dev server (worker-written code) can only write its workspace. */
+  constructor(private sandbox?: CommandSandbox) {}
+
   /** Start the run's preview if it isn't running, and wait until it answers HTTP. */
   async ensure(runId: number, cwd: string, spec: PreviewSpec): Promise<{ origin: string; url: string }> {
     const inflight = this.starting.get(runId);
@@ -65,11 +69,12 @@ export class PreviewManager {
   private async start(runId: number, cwd: string, spec: PreviewSpec): Promise<Preview> {
     const port = await freePort();
     const origin = `http://127.0.0.1:${port}`;
-    const proc = Bun.spawn(["setsid", "sh", "-c", spec.run], {
+    const argv = this.sandbox ? this.sandbox.wrap(spec.run, cwd, { network: "host" }) : ["setsid", "sh", "-c", spec.run];
+    const proc = Bun.spawn(argv, {
       cwd,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, PORT: String(port), BUN_PORT: String(port), HOST: "127.0.0.1", HOSTNAME: "127.0.0.1", BROWSER: "none" },
+      env: workerEnv({ PORT: String(port), BUN_PORT: String(port), HOST: "127.0.0.1", HOSTNAME: "127.0.0.1", BROWSER: "none" }),
     });
     const logs: string[] = [];
     const pump = async (stream: ReadableStream<Uint8Array>) => {

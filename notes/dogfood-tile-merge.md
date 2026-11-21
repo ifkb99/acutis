@@ -233,3 +233,32 @@ browser driver), `bunx tsc --noEmit`, two cheap Haiku SDK probes, and a second r
 - Spend on killed turns is still invisible (no `result` is sent), and there's still no live cost mid-turn.
 - `npx --no-install tsc` prompted in run 3. That's correct behaviour, but a read-only "version/check" tier for common tools would reduce prompts further.
 - DESIGN.md is updated. Two principles changed wording: workers now get Acutis's own in-process MCP server (no external ones), and operator notes are a policy input that lives outside trunk (they can add guidance, not loosen gates or permissions).
+
+## Sandbox on (2026-11-20, later)
+The sandbox had been off because Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1` blocked
+bubblewrap (`setting up uid map: Permission denied`). After an AppArmor profile was added for
+`/usr/bin/bwrap` (`userns`, unconfined, same shape as the claude-desktop one), `probeSandbox()`
+passed and the daemon reported `Sandbox: on`.
+
+Run 4 on tile-merge was a probe ticket. The agent ran a fixed list of commands and reported the results ($0.26, 27s):
+| Probe | Result |
+|---|---|
+| write inside the workspace | works |
+| write `/tmp`, `$HOME`, `~/Workspace/Acutis` | `Read-only file system` (checked on the host: no files) |
+| `curl https://example.com` | surfaced to the operator as a `SandboxNetworkAccess {"host":"example.com"}` permission. Denied, so curl timed out. |
+| `curl 127.0.0.1:7777/api/state` (the Acutis API) | `Couldn't connect`: the network namespace hides host localhost, and no prompt appears |
+| `bun test` | works (40 pass) |
+
+- **API reach is closed for the agent's own commands while the sandbox is on.** That claim was too broad at first.
+  Gates and the preview server were still spawned straight on the host with the daemon's full environment. A worker
+  could write a test that calls the API or reads `ANTHROPIC_API_KEY`, and the gate would run it unconfined.
+  **Fixed:** a `CommandSandbox` (bubblewrap) now confines gates (no network, workspace-only writes, private /tmp
+  and PID namespace, Acutis data and credential directories hidden). The preview gets the same filesystem limits
+  but keeps the host network. Both get credential-looking environment variables removed. Test:
+  `tests/sandbox.test.ts`, where a worker-written `evil.ts` gate gets "api unreachable, write refused,
+  key=none". The same test fails with the sandbox removed ("api reached, wrote outside").
+  **Still open:** the preview server can reach localhost, so the token fix is still needed for that path and for
+  sandbox-off machines.
+- **Network goes through the permission flow, per host.** That gives a reasonable "allow this registry" story. A
+  per-repo allowed-hosts list in the workflow would avoid repeated prompts.
+- **The agent's preview/browser tools still work under the sandbox.** They run in the Acutis process, outside it.
