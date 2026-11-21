@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { Repo, Run, RunEvent, Ticket, PermissionRequest } from "../core/types";
+import type { Noticed, Repo, Run, RunEvent, Ticket, PermissionRequest } from "../core/types";
 import { Markdown } from "./markdown";
 
 // ------------------------------------------------------------------- api
@@ -108,6 +108,8 @@ function App() {
   });
   const [error, setError] = useState<string | null>(null);
   const [needsToken, setNeedsToken] = useState(!token);
+  const [noticed, setNoticed] = useState<Noticed[]>([]);
+  const loadNoticed = useCallback(() => api<Noticed[]>("/api/noticed").then(setNoticed).catch(() => {}), []);
   const [pending, setPending] = useState<Map<string, number>>(new Map());
   const eventSink = useRef<((e: RunEvent) => void) | null>(null);
 
@@ -119,7 +121,8 @@ function App() {
     setSandbox(s.sandbox);
     setSandboxReason(s.sandboxReason);
     setPending(new Map((s.permissions ?? []).map((p: { runId: number; req: PermissionRequest }) => [p.req.id, p.runId])));
-  }, []);
+    await loadNoticed();
+  }, [loadNoticed]);
 
   useEffect(() => {
     if (!token) return; // nothing to ask with; the sign-in screen is already showing
@@ -148,6 +151,7 @@ function App() {
     else if (m.type === "run") setRuns((prev) => new Map(prev).set(m.run.id, m.run));
     else if (m.type === "event") {
       const e = m.event;
+      if (e.kind === "noticed") loadNoticed();
       if (e.kind === "permission.request") setPending((p) => new Map(p).set((e.data as any).id, e.run_id));
       else if (e.kind === "permission.decision") {
         setPending((p) => {
@@ -230,6 +234,18 @@ function App() {
           </div>
         </div>
         <NewTicket repos={repos} onCreate={(t) => setTickets((prev) => new Map(prev).set(t.id, t))} onError={setError} />
+        <NoticedPanel
+          items={noticed}
+          onTicket={(id) =>
+            act(async () => {
+              const t = await api<Ticket>(`/api/noticed/${id}/ticket`, "POST");
+              setTickets((prev) => new Map(prev).set(t.id, t));
+              await loadNoticed();
+            })
+          }
+          onDismiss={(id) => act(async () => (await api(`/api/noticed/${id}/dismiss`, "POST"), await loadNoticed()))}
+          onOpenRun={(id) => setSelected(id)}
+        />
         <RepoNotes repos={repos} onSaved={(r) => setRepos((prev) => prev.map((x) => (x.name === r.name ? r : x)))} onError={setError} />
         {COLUMNS.map((col) => {
           const items = [...tickets.values()].filter((t) => t.status === col.key).sort((a, b) => b.id - a.id);
@@ -405,6 +421,59 @@ function readPng(file: Blob): Promise<string> {
 }
 
 // ------------------------------------------------------------------- run view
+
+/** Problems workers noticed outside their tickets: the operator makes a ticket or dismisses each. */
+function NoticedPanel({
+  items,
+  onTicket,
+  onDismiss,
+  onOpenRun,
+}: {
+  items: Noticed[];
+  onTicket: (id: number) => void;
+  onDismiss: (id: number) => void;
+  onOpenRun: (runId: number) => void;
+}) {
+  if (!items.length) return null;
+  return (
+    <details className="col noticed" open>
+      <summary>
+        <h2 title="Problems workers found outside their tickets. Worker-written and unchecked.">Noticed · {items.length}</h2>
+      </summary>
+      {items.map((n) => (
+        <div className="card noticed-item" key={n.id}>
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className={`chip kind-${n.kind}`}>{n.kind}</span>
+            {n.count > 1 && <span className="chip" title="Reports merged into this one">×{n.count}</span>}
+          </div>
+          <div className="title">{n.title}</div>
+          {n.detail && <div className="detail">{n.detail.length > 240 ? `${n.detail.slice(0, 240)}…` : n.detail}</div>}
+          <div className="row">
+            <span className="muted">
+              {n.repo} ·{" "}
+              {n.run_ids
+                .split(",")
+                .filter(Boolean)
+                .map((r) => (
+                  <a key={r} href={`#run-${r}`} onClick={() => onOpenRun(Number(r))}>
+                    run {r}{" "}
+                  </a>
+                ))}
+            </span>
+          </div>
+          <div className="row">
+            <button className="btn" onClick={() => onTicket(n.id)} title="Create a ticket from this report (marked as worker-written)">
+              Make ticket
+            </button>
+            <button className="btn" onClick={() => onDismiss(n.id)}>
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ))}
+    </details>
+  );
+}
 
 function stateLabel(run: Run, queuePos: Map<number, number>): string {
   if (run.state === "queued") return queuePos.has(run.id) ? `queued · #${queuePos.get(run.id)} in line` : "queued";
@@ -760,6 +829,13 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
         <div className="ev log">
           {d.caption}
           <Shot runId={runId} name={d.name} caption={d.caption} />
+        </div>
+      );
+    case "noticed":
+      return (
+        <div className="ev log">
+          noticed #{d.id} [{d.kind}] {d.title}
+          {d.merged ? ` (merged; ${d.count} reports)` : ""}
         </div>
       );
     case "review.note":

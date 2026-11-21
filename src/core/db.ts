@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Repo, Run, RunEvent, RunState } from "./types";
+import type { Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS repos (
@@ -47,6 +47,21 @@ CREATE TABLE IF NOT EXISTS events (
   ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   kind TEXT NOT NULL,
   data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS noticed (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  title_key TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  evidence TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  count INTEGER NOT NULL DEFAULT 1,
+  run_ids TEXT NOT NULL DEFAULT '',
+  ticket_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS runs_ticket ON runs(ticket_id);
@@ -116,6 +131,43 @@ export class Store {
         .run({ ...patch, id } as any);
     }
     return this.getRun(id)!;
+  }
+
+  // ---- noticed (no foreign key to runs: reports outlive a discarded run)
+  /** Add a report, or merge it into an open one with the same normalised title in the repo. */
+  addNoticed(n: { repo: string; runId: number; kind: NoticedKind; title: string; detail: string; evidence: string }): { noticed: Noticed; merged: boolean } {
+    const key = n.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    const open = this.db
+      .query<Noticed, [string, string]>("SELECT * FROM noticed WHERE repo = ? AND title_key = ? AND status = 'open'")
+      .get(n.repo, key);
+    if (open) {
+      const runs = new Set(open.run_ids.split(",").filter(Boolean));
+      runs.add(String(n.runId));
+      this.db
+        .query("UPDATE noticed SET count = count + 1, run_ids = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
+        .run([...runs].join(","), open.id);
+      return { noticed: this.getNoticed(open.id)!, merged: true };
+    }
+    const row = this.db
+      .query<{ id: number }, any>(
+        "INSERT INTO noticed (repo, kind, title, title_key, detail, evidence, run_ids) VALUES ($repo, $kind, $title, $key, $detail, $evidence, $runs) RETURNING id",
+      )
+      .get({ repo: n.repo, kind: n.kind, title: n.title, key, detail: n.detail, evidence: n.evidence, runs: String(n.runId) })!;
+    return { noticed: this.getNoticed(row.id)!, merged: false };
+  }
+  getNoticed(id: number): Noticed | null {
+    return this.db.query<Noticed, [number]>("SELECT * FROM noticed WHERE id = ?").get(id);
+  }
+  listNoticed(status?: Noticed["status"]): Noticed[] {
+    return status
+      ? this.db.query<Noticed, [string]>("SELECT * FROM noticed WHERE status = ? ORDER BY id DESC").all(status)
+      : this.db.query<Noticed, []>("SELECT * FROM noticed ORDER BY id DESC LIMIT 500").all();
+  }
+  updateNoticed(id: number, patch: { status: Noticed["status"]; ticket_id?: number | null }): Noticed {
+    this.db
+      .query("UPDATE noticed SET status = ?, ticket_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
+      .run(patch.status, patch.ticket_id ?? null, id);
+    return this.getNoticed(id)!;
   }
 
   // ---- events

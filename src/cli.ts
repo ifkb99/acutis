@@ -22,6 +22,8 @@ Repos and tickets
   acutis ticket add <repo> <title> [--body TEXT | --body-file PATH]
   acutis ticket ls
   acutis ticket cancel <ticket-id>
+  acutis noticed [--all]                       Problems workers noticed outside their tickets
+  acutis noticed ticket|dismiss <id>           Turn one into a ticket, or dismiss it
 
 Runs
   acutis start <ticket-id> [--watch]           Start a run for a ticket
@@ -228,6 +230,8 @@ function formatEvent(e: { id: number; kind: string; data: any }): string | null 
       return `  screenshot: ${d.caption} → ${base}/api/runs/${(e as any).run_id}/artifacts/${d.name}`;
     case "review.note":
       return `note: ${d.text}${d.artifact ? " [image]" : ""}`;
+    case "noticed":
+      return `  noticed #${d.id} [${d.kind}] ${d.title}${d.merged ? ` (merged, ×${d.count})` : ""}`;
     case "policy.flag":
       return `! ${d.msg} ${(d.files ?? []).join(", ")}`;
     case "system.log":
@@ -421,6 +425,22 @@ switch (cmd) {
   case "dashboard":
     console.log(dashboardLink());
     break;
+  case "noticed": {
+    if (sub === "ticket" || sub === "dismiss") {
+      const id = runArg(rest[0], `acutis noticed ${sub} <id>`);
+      const out = await post(`/api/noticed/${id}/${sub}`);
+      console.log(sub === "ticket" ? `Ticket #${out.id} created from noticed #${id}: ${out.title}` : `Noticed #${id} dismissed`);
+      break;
+    }
+    const list = await api(`/api/noticed${sub === "--all" ? "?status=all" : ""}`);
+    if (!list.length) console.log(sub === "--all" ? "Nothing noticed yet." : "No open reports.");
+    for (const n of list) {
+      const runs = String(n.run_ids).split(",").filter(Boolean).map((r: string) => `run ${r}`).join(", ");
+      console.log(`#${n.id}\t[${n.kind}] ${n.title}\t${n.repo} · ${runs}${n.count > 1 ? ` · ×${n.count}` : ""}${n.status === "open" ? "" : ` · ${n.status}${n.ticket_id ? ` #${n.ticket_id}` : ""}`}`);
+      if (n.detail) console.log(`\t${String(n.detail).split("\n")[0]!.slice(0, 160)}`);
+    }
+    break;
+  }
   case "start": {
     const { values, positionals } = parseArgs({ args: [sub, ...rest].filter((x): x is string => x !== undefined), allowPositionals: true, options: { watch: { type: "boolean" } } });
     const id = runArg(positionals[0], "acutis start <ticket-id> [--watch]");
