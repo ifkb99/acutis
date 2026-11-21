@@ -106,6 +106,20 @@ describe("end to end", () => {
       expect(r.blocked.some((b) => b.startsWith(`popup ${info!.origin}`))).toBe(true);
     }, 60000);
 
+    test.skipIf(!chrome)("the Noticed panel shows a worker's report and Make ticket turns it into a ticket (headless Chrome)", async () => {
+      const { noticed } = app.store.addNoticed({ repo: "e2e", runId, kind: "bug", title: "E2E noticed thing", detail: "Found while testing.", evidence: "" });
+      const r = await browser.check({
+        url: `${dash}/#token=${app.token}`,
+        steps: "waitfor .noticed-item\nclick .noticed-item .btn\nwait 1200",
+        script: `JSON.stringify({ panel: !!document.querySelector('.noticed-item'), ticket: [...document.querySelectorAll('.card')].some((c) => c.textContent.includes('E2E noticed thing')) })`,
+        width: 1300,
+        height: 900,
+      });
+      expect(r.failure).toBeUndefined();
+      expect(JSON.parse(r.scriptResult!)).toEqual({ panel: false, ticket: true });
+      expect(app.store.getNoticed(noticed.id)).toMatchObject({ status: "ticketed" });
+    }, 60000);
+
     test.skipIf(!chrome)("without the token the dashboard asks for the link; pasting it into the open tab signs in (headless Chrome)", async () => {
       // Each check is a fresh Chrome profile, so nothing is in localStorage yet.
       const r = await browser.check({

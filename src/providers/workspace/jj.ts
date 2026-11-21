@@ -98,6 +98,11 @@ export class JjWorkspaceProvider implements WorkspaceProvider {
     return ids[0]!;
   }
 
+  async listFiles(repo: Repo, commit: string): Promise<string[]> {
+    const out = await jj(repo.path, ["file", "list", "--ignore-working-copy", "-r", commit]);
+    return out.split("\n").filter(Boolean);
+  }
+
   async readAt(repo: Repo, commit: string, file: string): Promise<string | null> {
     try {
       return await jj(repo.path, ["file", "show", "--ignore-working-copy", "-r", commit, `root-file:"${file}"`]);

@@ -104,6 +104,9 @@ effort: high
 setup:                 # optional: run in the fresh workspace before the agent starts
   - bun install
 preview: bun --port=$PORT ./index.html   # optional: Acutis runs it; the agent gets preview/browser tools
+library:               # optional: which tracked docs workers can search (these are the defaults); false = off
+  include: ["**/*.md", "**/*.mdx", "**/*.rst", "docs/**/*.txt"]
+  exclude: ["**/node_modules/**", "**/vendor/**", ".acutis/**"]
 gates:                 # run in the workspace after the agent finishes; failures go back to the agent
   - bun run typecheck
   - bun test

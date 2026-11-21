@@ -98,6 +98,8 @@ export interface WorkspaceProvider {
   resolve(repo: Repo, revset: string): Promise<string>;
   /** Read a file at a given commit, or null if it doesn't exist. */
   readAt(repo: Repo, commit: string, file: string): Promise<string | null>;
+  /** Paths of the files tracked at a commit, relative to the repo root. */
+  listFiles(repo: Repo, commit: string): Promise<string[]>;
   create(repo: Repo, name: string, baseCommit: string): Promise<Workspace>;
   diff(repo: Repo, ws: Workspace): Promise<string>;
   changedFiles(repo: Repo, ws: Workspace): Promise<string[]>;
@@ -291,4 +293,26 @@ export interface Workflow {
   template: string;
   /** Where the workflow came from, for display. */
   source: string;
+  /** Which tracked files the project library indexes; false turns the library off for the repo. */
+  library: { include: string[]; exclude: string[] } | false;
+}
+
+export type NoticedKind = "bug" | "failing-check" | "tech-debt" | "docs" | "security" | "idea" | "other";
+export const NOTICED_KINDS: NoticedKind[] = ["bug", "failing-check", "tech-debt", "docs", "security", "idea", "other"];
+
+/** Something a worker noticed outside its ticket. Reports with the same title in a repo are merged. */
+export interface Noticed {
+  id: number;
+  repo: string;
+  kind: NoticedKind;
+  title: string;
+  detail: string;
+  evidence: string;
+  status: "open" | "dismissed" | "ticketed";
+  /** How many reports were merged into this one, and from which runs (comma-separated ids). */
+  count: number;
+  run_ids: string;
+  ticket_id: number | null;
+  created_at: string;
+  updated_at: string;
 }

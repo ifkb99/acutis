@@ -81,6 +81,14 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
         })),
       },
       "/api/permissions": { GET: api(() => runs.allPendingPermissions()) },
+      "/api/noticed": {
+        GET: api((req) => {
+          const status = new URL(req.url).searchParams.get("status");
+          return runs.listNoticed(status === "all" ? undefined : status === "dismissed" || status === "ticketed" ? status : "open");
+        }),
+      },
+      "/api/noticed/:id/dismiss": { POST: api((req) => runs.dismissNoticed(Number(req.params.id))) },
+      "/api/noticed/:id/ticket": { POST: api((req) => runs.ticketFromNoticed(Number(req.params.id))) },
       "/api/repos/:name": {
         GET: api((req) => {
           const repo = store.getRepo(req.params.name!);

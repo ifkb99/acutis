@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import type { Store } from "./db";
 import type { Hub } from "./hub";
 import { workerEnv } from "./env";
+import { Library, formatHits, type LibraryConfig, type RunSummary } from "./library";
 import { PreviewManager } from "./preview";
 import type {
   AcutisTool,
@@ -13,6 +14,8 @@ import type {
   CommandGate,
   CommandSandbox,
   Gate,
+  Noticed,
+  NoticedKind,
   PermissionDecision,
   PermissionRequest,
   Repo,
@@ -25,7 +28,7 @@ import type {
   Workspace,
   WorkspaceProvider,
 } from "./types";
-import { ACTIVE_STATES, SLOT_STATES, TERMINAL_STATES } from "./types";
+import { ACTIVE_STATES, NOTICED_KINDS, SLOT_STATES, TERMINAL_STATES } from "./types";
 import { WORKFLOW_PATH, defaultWorkflow, describeGate, parseWorkflow, renderTemplate, workerSystemPrompt } from "./workflow";
 
 export class RunError extends Error {
@@ -60,6 +63,8 @@ interface Active {
   /** In-flight cost poll (single-flight) and when the last one started. */
   costPoll: Promise<void> | null;
   lastCostPoll: number;
+  /** Noticed reports filed by this run's worker (capped per run). */
+  noticedCount: number;
 }
 
 function killGroup(proc: Subprocess) {
@@ -96,6 +101,8 @@ export function costDelta(total: number, lastSeen: number | null, kind: "result"
 }
 
 const COST_POLL_TIMEOUT_MS = 2000;
+const MAX_NOTICED_PER_RUN = 10;
+const clip = (s: unknown, n: number) => String(s ?? "").trim().slice(0, n);
 
 const unavailableBrowser: BrowserProvider = {
   available: false,
@@ -106,6 +113,8 @@ export class RunManager {
   private active = new Map<number, Active>();
   private landing = new Map<string, Promise<unknown>>();
   readonly previews: PreviewManager;
+  readonly library: Library;
+  private libraryIndexing = new Map<string, Promise<void>>();
   private browser: BrowserProvider;
 
   constructor(
@@ -130,6 +139,7 @@ export class RunManager {
   ) {
     this.browser = deps.browser ?? unavailableBrowser;
     this.previews = new PreviewManager(deps.commandSandbox);
+    this.library = new Library(deps.store.db);
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -275,8 +285,13 @@ export class RunManager {
       turnCost: 0,
       costPoll: null,
       lastCostPoll: 0,
+      noticedCount: 0,
     };
     this.active.set(run.id, a);
+
+    // Before setup steps: they write files (node_modules, build docs) that aren't trunk.
+    await this.indexLibrary(run.id, repo, ws, workflow);
+    if (this.mustGet(run.id).state !== "preparing") return;
 
     for (const step of workflow.setup) {
       const r = await this.runCommand(run.id, a, step, "setup", () => this.mustGet(run.id).state === "preparing");
@@ -284,6 +299,90 @@ export class RunManager {
       if (!r.ok) throw new Error(`setup step failed: ${step.run} (exit ${r.code})`);
     }
     this.launch(run.id, renderTemplate(workflow.template, ticket));
+  }
+
+  /**
+   * Index the repo's docs at the run's base commit, once per commit, from the fresh workspace
+   * (still exactly that commit). Never fails the run: the library is a help, not a requirement.
+   */
+  private async indexLibrary(runId: number, repo: Repo, ws: Workspace, workflow: Workflow) {
+    if (!workflow.library || this.library.isIndexed(repo.name, ws.baseCommit)) return;
+    const key = `${repo.name}@${ws.baseCommit}`;
+    let job = this.libraryIndexing.get(key);
+    if (!job) {
+      const cfg = workflow.library as LibraryConfig;
+      job = (async () => {
+        const files = await this.deps.workspaces.listFiles(repo, ws.baseCommit);
+        const r = this.library.index(repo.name, ws.baseCommit, ws.path, files, cfg);
+        // Keep the commits live runs still search; drop the rest.
+        const live = this.deps.store
+          .listRuns(1000)
+          .filter((x) => x.repo === repo.name && !TERMINAL_STATES.includes(x.state) && x.base_commit)
+          .map((x) => x.base_commit!);
+        this.library.prune(repo.name, [...live, ws.baseCommit]);
+        this.deps.hub.emit(runId, "system.log", {
+          msg: `Project library: ${r.files} docs (${r.chunks} sections) indexed at ${ws.baseCommit.slice(0, 12)}`,
+        });
+      })().finally(() => this.libraryIndexing.delete(key));
+      this.libraryIndexing.set(key, job);
+    }
+    try {
+      await job;
+    } catch (e) {
+      this.deps.hub.emit(runId, "system.log", { level: "warn", msg: `Project library unavailable for this run: ${(e as Error).message}` });
+    }
+  }
+
+  /** Add newly landed runs to the library: ticket text plus the worker's final report. */
+  private refreshRunSummaries(repo: string) {
+    const have = this.library.summarizedRuns(repo);
+    const fresh: RunSummary[] = this.deps.store
+      .listRuns(1000)
+      .filter((r) => r.repo === repo && r.state === "done" && !have.has(r.id))
+      .slice(0, 50)
+      .map((r) => {
+        const ticket = this.deps.tickets.get(r.ticket_id);
+        const report = String(this.deps.store.lastEventData(r.id, "agent.result")?.result ?? "").trim();
+        return {
+          runId: r.id,
+          title: `Run ${r.id}: ${ticket?.title ?? "(ticket gone)"}`,
+          body: clip(`${ticket?.body ?? ""}\n\nThe worker's final report:\n${report || "(none)"}`, 4000),
+        };
+      });
+    if (fresh.length) this.library.addRunSummaries(repo, fresh);
+  }
+
+  // ---------------------------------------------------------------- noticed
+
+  listNoticed(status?: Noticed["status"]): Noticed[] {
+    return this.deps.store.listNoticed(status);
+  }
+
+  dismissNoticed(id: number): Noticed {
+    const n = this.deps.store.getNoticed(id);
+    if (!n) throw new RunError(`noticed #${id} not found`, 404);
+    if (n.status !== "open") throw new RunError(`noticed #${id} is already ${n.status}`, 409);
+    return this.deps.store.updateNoticed(id, { status: "dismissed" });
+  }
+
+  /** Turn a report into a ticket. Its text is worker-written, so the ticket says so. */
+  ticketFromNoticed(id: number): Ticket {
+    const n = this.deps.store.getNoticed(id);
+    if (!n) throw new RunError(`noticed #${id} not found`, 404);
+    if (n.status !== "open") throw new RunError(`noticed #${id} is already ${n.status}`, 409);
+    if (!this.deps.store.getRepo(n.repo)) throw new RunError(`repo "${n.repo}" is not registered`, 409);
+    const runs = n.run_ids.split(",").filter(Boolean).map((r) => `run ${r}`).join(", ");
+    const body = [
+      `Noticed by the worker of ${runs}${n.count > 1 ? ` (reported ${n.count} times)` : ""}, while working on another ticket.`,
+      "This text was written by a worker and hasn't been checked: confirm the problem before fixing it.",
+      "",
+      n.detail || "(no detail)",
+      ...(n.evidence ? ["", "Evidence:", n.evidence] : []),
+    ].join("\n");
+    const ticket = this.deps.tickets.create({ repo: n.repo, title: n.title, body });
+    this.deps.hub.ticket(ticket);
+    this.deps.store.updateNoticed(id, { status: "ticketed", ticket_id: ticket.id });
+    return ticket;
   }
 
   /** Rebuild in-memory state for a run whose session is not live (after restart, review, or failure). */
@@ -311,6 +410,7 @@ export class RunManager {
       turnCost: 0,
       costPoll: null,
       lastCostPoll: 0,
+      noticedCount: 0,
     };
     this.active.set(runId, a);
     return a;
@@ -588,6 +688,8 @@ export class RunManager {
       return x;
     };
     const wf = this.active.get(runId)?.workflow;
+    if (wf?.library) tools.push(...this.libraryTools(runId, a));
+    tools.push(this.noticedTool(runId, a));
     if (!wf?.preview) return tools;
     tools.push({
       name: "preview",
@@ -638,6 +740,99 @@ export class RunManager {
       });
     }
     return tools;
+  }
+
+  private libraryTools(runId: number, a: () => Active): AcutisTool[] {
+    return [
+      {
+        name: "search_project",
+        description:
+          "Search this project's docs (README, design docs, notes; as of trunk) and summaries of earlier landed runs. " +
+          "Returns a few short excerpts with path:line, so use it before reading many files to find where something is explained. " +
+          "Plain words work best; results are ranked by relevance.",
+        params: {
+          query: { type: "string", description: 'What you are looking for, e.g. "how previews are started" or "lockfile policy".' },
+          limit: { type: "number", description: "Results to return (default 6, max 10).", optional: true },
+        },
+        handler: async (args): Promise<ToolOutput> => {
+          const x = a();
+          const query = clip(args.query, 300);
+          if (!query) return { text: "query is empty", isError: true };
+          this.refreshRunSummaries(x.repo.name);
+          let commit: string | null = x.ws.baseCommit;
+          let note = "";
+          if (!this.library.isIndexed(x.repo.name, commit)) {
+            commit = this.library.latestCommit(x.repo.name);
+            note = commit
+              ? `; your base isn't indexed, so these docs are as of ${commit.slice(0, 12)} and may differ from your workspace`
+              : "; no docs are indexed for this repo, only landed runs";
+          }
+          const limit = typeof args.limit === "number" ? args.limit : 6;
+          const hits = this.library.search(x.repo.name, commit, query, limit);
+          if (!hits.length) return { text: `No library results for "${query}"${note}. Try other words, or search the code with Grep.` };
+          const where = commit ? `docs as of ${commit.slice(0, 12)}` : "landed runs only";
+          return {
+            text: formatHits(
+              hits,
+              `Project library, ${where}${note}. ${hits.length} result(s) for "${query}". Open one in full with read_project_entry; doc paths are also files in your workspace.`,
+            ),
+          };
+        },
+      },
+      {
+        name: "read_project_entry",
+        description: "Open one search_project result in full by its id (e.g. L42).",
+        params: { id: { type: "string", description: "The result id from search_project, like L42." } },
+        handler: async (args): Promise<ToolOutput> => {
+          const x = a();
+          const e = this.library.read(x.repo.name, String(args.id ?? ""));
+          if (!e) return { text: `No library entry ${JSON.stringify(args.id)} for this repo.`, isError: true };
+          const where = e.kind === "doc" ? `${e.ref}:${e.line}` : `${e.ref} (landed; written by its worker)`;
+          return { text: `[${String(args.id).trim()}] ${where}${e.heading ? ` · ${e.heading}` : ""}\n\n${clip(e.body, 4000)}` };
+        },
+      },
+    ];
+  }
+
+  private noticedTool(runId: number, a: () => Active): AcutisTool {
+    return {
+      name: "report_noticed",
+      description:
+        "Record a problem you noticed that is NOT part of your ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue, an idea), " +
+        "instead of fixing it here. The operator reviews these and may turn them into tickets. Give evidence the operator can check: file:line, a command and its output.",
+      params: {
+        title: { type: "string", description: "One line naming the problem, e.g. \"clippy --all-targets fails on base (manual_slice_fill in tests/assault.rs)\"." },
+        detail: { type: "string", description: "What is wrong and why it matters, in a few sentences." },
+        evidence: { type: "string", description: "file:line references, commands and their output.", optional: true },
+        kind: { type: "string", description: `One of: ${NOTICED_KINDS.join(", ")}. Default: other.`, optional: true },
+      },
+      handler: async (args): Promise<ToolOutput> => {
+        const x = a();
+        // One line: it becomes a ticket title, and from there the first line of a landing commit.
+        const title = clip(String(args.title ?? "").replace(/\s+/g, " "), 200);
+        if (!title) return { text: "title is empty", isError: true };
+        if (x.noticedCount >= MAX_NOTICED_PER_RUN) {
+          return { text: `This run already filed ${MAX_NOTICED_PER_RUN} reports; mention anything else in your final summary.`, isError: true };
+        }
+        x.noticedCount++;
+        const kind = (NOTICED_KINDS as string[]).includes(String(args.kind)) ? (args.kind as NoticedKind) : "other";
+        const { noticed, merged } = this.deps.store.addNoticed(
+          { repo: x.repo.name, runId, kind, title, detail: clip(args.detail, 4000), evidence: clip(args.evidence, 4000) },
+          // A ticketed problem whose ticket is done has come back: that's a new report.
+          (n) => n.status === "ticketed" && n.ticket_id !== null && this.deps.tickets.get(n.ticket_id)?.status === "done",
+        );
+        this.deps.hub.emit(runId, "noticed", { id: noticed.id, kind, title: noticed.title, merged, count: noticed.count, status: noticed.status });
+        const known =
+          noticed.status === "dismissed"
+            ? `The operator already looked at this and dismissed it (noticed #${noticed.id}); your report was counted.`
+            : noticed.status === "ticketed"
+              ? `This is already ticket #${noticed.ticket_id} (from noticed #${noticed.id}); your report was counted.`
+              : merged
+                ? `Merged into noticed #${noticed.id}, which ${noticed.count} reports now share.`
+                : `Recorded as noticed #${noticed.id}.`;
+        return { text: `${known} Don't fix it as part of this ticket.` };
+      },
+    };
   }
 
   /** Start the run's preview for a human reviewer. */

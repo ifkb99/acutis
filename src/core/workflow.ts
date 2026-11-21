@@ -1,3 +1,4 @@
+import { DEFAULT_LIBRARY_EXCLUDE, DEFAULT_LIBRARY_INCLUDE } from "./library";
 import type { BrowserGate, CommandGate, Gate, PreviewSpec, Repo, Ticket, Workflow } from "./types";
 
 export const WORKFLOW_PATH = ".acutis/workflow.md";
@@ -77,6 +78,7 @@ export function defaultWorkflow(): Workflow {
     land: "bookmark",
     template: DEFAULT_TEMPLATE,
     source: "(default)",
+    library: { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE] },
   };
 }
 
@@ -135,6 +137,19 @@ function parseSetup(v: unknown): CommandGate[] {
   return v.map((g, i) => parseCommand(g, "setup step", i));
 }
 
+/** `library: false`, or `library: { include: [globs], exclude: [globs] }` (each replaces its default). */
+function parseLibrary(v: unknown): Workflow["library"] {
+  if (v === false) return false;
+  const defaults = { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE] };
+  if (v === undefined || v === null || v === true) return defaults;
+  if (typeof v !== "object" || Array.isArray(v)) throw new Error('workflow: "library" must be false or { include, exclude }');
+  const l = v as Record<string, unknown>;
+  return {
+    include: l.include === undefined ? defaults.include : asStringArray(l.include, "library.include"),
+    exclude: l.exclude === undefined ? defaults.exclude : asStringArray(l.exclude, "library.exclude"),
+  };
+}
+
 function parsePreview(v: unknown): PreviewSpec | undefined {
   if (v === undefined || v === null) return undefined;
   const p = (typeof v === "string" ? { run: v } : v) as Record<string, unknown>;
@@ -168,6 +183,7 @@ export function parseWorkflow(text: string, source: string): Workflow {
   if (meta.land === "push" || meta.land === "bookmark" || meta.land === "trunk") wf.land = meta.land;
   else if (meta.land !== undefined) throw new Error('workflow: "land" must be bookmark, push or trunk');
   if (body.trim()) wf.template = body.trim();
+  wf.library = parseLibrary(meta.library);
   return wf;
 }
 
@@ -223,7 +239,15 @@ Rules:
 
 When you finish, Acutis runs these checks in the workspace:
 ${gates}
-Run them yourself first where you can.${preview}${notes}
+Run them yourself first where you can.${
+    opts.workflow.library
+      ? `
+
+Project knowledge: \`mcp__acutis__search_project\` searches this repo's docs (as of trunk) and summaries of earlier landed runs, returning short excerpts with path:line. Use it before reading many files to find where something is explained; open a result with \`mcp__acutis__read_project_entry\`.`
+      : ""
+  }
+
+Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket.${preview}${notes}
 
 End with a short summary: what you changed, why, and how you verified it.`;
 }
