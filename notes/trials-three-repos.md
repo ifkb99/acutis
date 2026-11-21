@@ -157,7 +157,8 @@ where the worker showed my concern was wrong. The other was a default I reversed
   1. ~~**The preview server can reach the Acutis API** (host network). Needs the per-daemon token.~~
      **Done (2026-11-21):** the API needs a token, and sandboxed previews get their own network namespace with the port relayed out.
   0. **New, highest (2026-11-21): host Unix sockets are reachable from gates and previews.** Inside `BwrapSandbox`,
-     the session D-Bus (`systemd-run --user` runs a process outside the sandbox) and `/var/run/docker.sock` both connect.
+     the session D-Bus (`systemd-run --user` runs a process outside the sandbox) and `/var/run/docker.sock` both connected.
+     `/run` is now hidden (stopgap); sockets under `$HOME` and elsewhere remain. See `notes/container-sandbox-plan.md`.
   2. **Placeholder files still confuse tree-walking tools** inside the agent's sandbox (`prettier .`). Find a way not to mount them.
   3. **No concurrency or resource limits** (a cargo exit 137 under 4 concurrent runs).
   4. **Killed-turn cost** is still invisible (the restart showed $0.00 for interrupted turns).

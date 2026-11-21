@@ -190,11 +190,20 @@ There are two separate questions: where the agent loop runs, and where the app r
     server's loopback port, and a host-side socat relays 127.0.0.1:port to that
     socket. So the preview can't reach the Acutis API, other TCP services on
     localhost or the internet; a dev server that needs the internet won't get it.
-  - **Open (found 2026-11-21): host Unix sockets are reachable from gates and
-    previews.** A network namespace doesn't cover path sockets. From inside
-    `BwrapSandbox`, `/run/user/$UID/bus` (so `systemd-run --user` starts a
-    process outside the sandbox) and `/var/run/docker.sock` both accept
-    connections. That escapes the filesystem, network and token protections.
+  - **Host Unix sockets (found 2026-11-21; partly closed).** A network
+    namespace doesn't cover path sockets, and a read-only mount doesn't stop
+    `connect()`. From inside `BwrapSandbox`, `/run/user/$UID/bus` (so
+    `systemd-run --user` started a process outside the sandbox) and
+    `/var/run/docker.sock` (root, for docker-group users) both accepted
+    connections, escaping the filesystem, network and token protections.
+    **Stopgap:** `/run` is now an empty tmpfs inside (test: `tests/sandbox.test.ts`,
+    fails without it). **Still open:** sockets elsewhere stay reachable. A scan
+    of one machine found `~/.cache/ibus`, wezterm's GUI socket, a Codex
+    app-server daemon, the Nix daemon and postfix. A full scan took 47s, so
+    hiding them one by one doesn't scale. Blocking `AF_UNIX` with seccomp
+    would break tools that use sockets in the private `/tmp` (tsx IPC in the
+    duke-ml harness gate). The planned fix is a container backend for gates
+    and previews (`notes/container-sandbox-plan.md`).
     Both get the daemon's environment minus credential-looking variables
     (`workerEnv`), sandbox or not. `setup:` steps run on the host: they are
     trunk policy, run before the worker has touched anything, and usually

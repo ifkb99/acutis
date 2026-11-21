@@ -9,8 +9,8 @@ const SECRET_DIRS = [".ssh", ".gnupg", ".aws", ".config/gh", ".claude", ".docker
 /**
  * Gates and preview servers in bubblewrap: the whole filesystem read-only, the workspace
  * read-write, a private /tmp, a fresh PID namespace (killing bwrap takes everything inside it),
- * Acutis's data dir plus common credential stores hidden behind empty tmpfs mounts, and an empty
- * network namespace, so the command can't reach the internet or the Acutis API on localhost.
+ * Acutis's data dir, common credential stores and /run hidden behind empty tmpfs mounts, and an
+ * empty network namespace, so the command can't reach the internet or the Acutis API on localhost.
  *
  * An exposed port (the preview) is bridged out through a Unix socket: socat inside the sandbox
  * listens on the socket and connects to 127.0.0.1:port in the sandbox's own loopback. The socket
@@ -27,6 +27,11 @@ export class BwrapSandbox implements CommandSandbox {
   wrap(command: string, cwd: string, opts: { expose?: { port: number; socket: string } } = {}): string[] {
     const argv = ["setsid", "bwrap", "--die-with-parent", "--unshare-pid", "--new-session", "--unshare-net"];
     argv.push("--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp");
+    // Unix sockets cross network namespaces, and a read-only mount doesn't stop connect(). /run holds
+    // the ones that escape outright: the session D-Bus (`systemd-run --user`), docker.sock (root,
+    // for docker-group users), podman, systemd. /var/run is a symlink into it. Sockets elsewhere
+    // (e.g. under $HOME) are still reachable; see DESIGN.md §6.
+    argv.push("--tmpfs", "/run");
     for (const h of this.hidden) {
       if (!existsSync(h)) continue;
       // A file can't take a tmpfs; bind /dev/null over it instead.

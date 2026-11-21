@@ -90,6 +90,33 @@ describe.skipIf(!usable)("BwrapSandbox (real bubblewrap)", () => {
     expect(await fetch(origin + "/").then(() => "up", () => "down")).toBe("down");
   }, 30000);
 
+  test("host Unix sockets under /run (D-Bus, docker.sock) can't be reached from inside", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const runtime = process.env.XDG_RUNTIME_DIR;
+    const sockets = ["/var/run/docker.sock", "/run/dbus/system_bus_socket"];
+    let listener: ReturnType<typeof Bun.listen> | null = null;
+    if (runtime?.startsWith("/run/")) {
+      // A socket of our own under the runtime dir, so the check doesn't depend on what's installed.
+      const dir = mkdtempSync(`${runtime}/acutis-sock-test-`);
+      listener = Bun.listen({ unix: `${dir}/s`, socket: { data() {} } });
+      sockets.push(`${dir}/s`, `${runtime}/bus`);
+    }
+    try {
+      const present = sockets.filter((s) => Bun.spawnSync(["test", "-S", s]).exitCode === 0);
+      expect(present.length).toBeGreaterThan(0);
+      const probe = (s: string) => `socat -u OPEN:/dev/null UNIX-CONNECT:${s} 2>/dev/null && echo "${s} reached" || echo "${s} refused"`;
+      // Positive control: each one accepts a connection on the host.
+      for (const s of present) expect(Bun.spawnSync(["sh", "-c", probe(s)]).stdout.toString().trim()).toBe(`${s} reached`);
+      const r = await run(present.map(probe).join("; "));
+      expect(r.out.split("\n")).toEqual(present.map((s) => `${s} refused`));
+    } finally {
+      if (listener) {
+        listener.stop(true);
+        Bun.spawnSync(["rm", "-rf", listener.unix!.replace(/\/s$/, "")]);
+      }
+    }
+  });
+
   test("killing the process group takes everything inside the sandbox", async () => {
     const tag = `30${process.pid % 1000}.5`; // a sleep duration unique to this test, to find it on the host
     const p = Bun.spawn(sb.wrap(`sleep ${tag} & sleep ${tag} & wait`, ws), { cwd: ws });
