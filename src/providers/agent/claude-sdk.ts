@@ -89,7 +89,7 @@ class ClaudeSdkSession implements AgentSession {
   private q: ReturnType<typeof query>;
   readonly events: AsyncIterable<AgentEvent>;
 
-  constructor(spec: AgentSpec, sandbox: boolean) {
+  constructor(spec: AgentSpec, sandbox: boolean, denyRead: string[]) {
     this.pending.push(userMessage(spec.prompt));
     const cwd = resolve(spec.cwd);
 
@@ -103,7 +103,8 @@ class ClaudeSdkSession implements AgentSession {
       permissionMode: "acceptEdits",
       allowedTools: spec.allow,
       // Workers report questions in their final message instead of blocking on a prompt.
-      disallowedTools: [...spec.deny, "AskUserQuestion"],
+      // "//abs/path" is Claude Code's rule syntax for an absolute path.
+      disallowedTools: [...spec.deny, ...denyRead.map((p) => `Read(/${p})`), "AskUserQuestion"],
       settingSources: ["project"],
       // Workers get no external MCP servers: not your claude.ai connectors (mail, Drive…), not a repo's
       // .mcp.json. The only server is Acutis's own, in-process.
@@ -129,7 +130,8 @@ class ClaudeSdkSession implements AgentSession {
         if (target) {
           const abs = resolve(cwd, target.replace(/^~(?=\/)/, process.env.HOME ?? "~"));
           const home = process.env.HOME ?? "";
-          if (home && SECRET_PATHS.some((p) => abs === `${home}/${p}` || abs.startsWith(`${home}/${p}/`))) {
+          const secret = (p: string) => abs === p || abs.startsWith(`${p}/`);
+          if ((home && SECRET_PATHS.some((p) => secret(`${home}/${p}`))) || denyRead.some(secret)) {
             return { behavior: "deny", message: `Acutis: credential paths are off-limits (${target}).` };
           }
         }
@@ -187,7 +189,8 @@ class ClaudeSdkSession implements AgentSession {
         failIfUnavailable: true,
         autoAllowBashIfSandboxed: true,
         allowUnsandboxedCommands: false,
-      } as Options["sandbox"];
+        ...(denyRead.length ? { filesystem: { denyRead } } : {}),
+      };
     }
 
     this.q = query({ prompt: this.input(), options });
@@ -281,8 +284,9 @@ class ClaudeSdkSession implements AgentSession {
 
 export class ClaudeSdkRunner implements AgentRunner {
   readonly name = "claude-sdk";
-  constructor(private opts: { sandbox: boolean }) {}
+  /** `denyRead`: absolute paths no worker may read, e.g. the Acutis API token. */
+  constructor(private opts: { sandbox: boolean; denyRead?: string[] }) {}
   start(spec: AgentSpec): AgentSession {
-    return new ClaudeSdkSession(spec, this.opts.sandbox);
+    return new ClaudeSdkSession(spec, this.opts.sandbox, this.opts.denyRead ?? []);
   }
 }

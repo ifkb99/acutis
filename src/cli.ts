@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createApp, loadConfig } from "./app";
+import { readToken } from "./core/token";
 import { killAllBrowsers } from "./providers/browser/chrome";
 import { makeNotifier } from "./server/notify";
 import { startServer } from "./server/server";
@@ -12,6 +13,7 @@ const USAGE = `acutis — local software factory
 
 Daemon
   acutis serve [--dev] [--allow-api-billing]   Start the daemon and dashboard
+  acutis dashboard                             Print the dashboard login link (it carries the API token)
 
 Repos and tickets
   acutis repo add <path> [--name N] [--base REV] [--init-jj]
@@ -49,10 +51,17 @@ function die(msg: string, code = 1): never {
   process.exit(code);
 }
 
+/** The daemon writes $ACUTIS_HOME/token on first start; the API refuses requests without it. */
+function token(): string {
+  return readToken(cfg.home) ?? die(`no API token in ${cfg.home}; run "acutis serve" first`);
+}
+
+const dashboardLink = () => `${base}/#token=${token()}`;
+
 async function api(path: string, init?: { method?: string; body?: unknown; raw?: boolean }) {
   const res = await fetch(`${base}${path}`, {
     method: init?.method ?? "GET",
-    headers: { "content-type": "application/json", "x-acutis": "1" },
+    headers: { "content-type": "application/json", "x-acutis": "1", authorization: `Bearer ${token()}` },
     body: init?.body === undefined ? undefined : JSON.stringify(init.body),
   }).catch(() => die(`daemon not reachable on port ${cfg.port}; run "acutis serve" first`));
   if (init?.raw) {
@@ -107,7 +116,8 @@ async function serve(args: string[]) {
   process.on("SIGTERM", shutdown);
   process.on("exit", () => app.runs.previews.stopAll());
 
-  console.log(`Acutis dashboard: ${base}`);
+  // The link carries the token, so it's only printed here and by `acutis dashboard`.
+  console.log(`Acutis dashboard: ${dashboardLink()}`);
   console.log(`Data: ${cfg.home}`);
   console.log(
     app.sandbox
@@ -236,7 +246,7 @@ async function watch(runId: number, follow: boolean): Promise<never> {
   const needsYou = (state: string, perms: number) => !follow && (STOP_STATES.has(state) || perms > 0);
   if (needsYou(initial.run.state, initial.permissions.length)) return finish(runId, initial.run.state, initial.permissions);
 
-  const ws = new WebSocket(`ws://127.0.0.1:${cfg.port}/ws`, { headers: { Origin: base } } as any);
+  const ws = new WebSocket(`ws://127.0.0.1:${cfg.port}/ws`, { headers: { Origin: base, authorization: `Bearer ${token()}` } } as any);
   let state = initial.run.state as string;
   let closing = false;
   return new Promise<never>((_, reject) => {
@@ -405,6 +415,9 @@ switch (cmd) {
       const t = await post(`/api/tickets/${id}/cancel`);
       console.log(`#${t.id} ${t.status}`);
     } else die(USAGE);
+    break;
+  case "dashboard":
+    console.log(dashboardLink());
     break;
   case "start": {
     const { values, positionals } = parseArgs({ args: [sub, ...rest].filter((x): x is string => x !== undefined), allowPositionals: true, options: { watch: { type: "boolean" } } });

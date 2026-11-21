@@ -367,7 +367,7 @@ export class RunManager {
     // Setup steps are trunk policy run before the worker has touched anything, so they run on the
     // host (they usually need the network). Gates run worker-written code: confine them.
     const sandbox = phase === "gate" ? this.deps.commandSandbox : undefined;
-    const argv = sandbox ? sandbox.wrap(step.run, a.ws.path, { network: "none" }) : ["setsid", "sh", "-c", step.run];
+    const argv = sandbox ? sandbox.wrap(step.run, a.ws.path) : ["setsid", "sh", "-c", step.run];
     const proc = Bun.spawn(argv, {
       cwd: a.ws.path,
       stdout: "pipe",

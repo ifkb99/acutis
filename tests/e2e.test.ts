@@ -62,7 +62,7 @@ describe("end to end", () => {
   {
     test.skipIf(!chrome)("the permission card's Allow once unblocks the run (headless Chrome)", async () => {
       const r = await browser.check({
-        url: `${dash}/#run-${runId}`,
+        url: `${dash}/#run-${runId}&token=${app.token}`,
         steps: "waitfor .perm .btn.ok\nclick .perm .btn.ok\nwait 800",
         script: `document.querySelector('.perm') === null && document.body.innerText.includes('not in the allowlist')`,
         width: 1300,
@@ -78,7 +78,7 @@ describe("end to end", () => {
 
     test.skipIf(!chrome)("markdown renders; notes editor and Add note save; Open preview opens the preview (headless Chrome)", async () => {
       const r = await browser.check({
-        url: `${dash}/#run-${runId}`,
+        url: `${dash}/#run-${runId}&token=${app.token}`,
         steps: [
           "waitfor .reponotes summary",
           "waitfor .ev.text strong",
@@ -92,18 +92,37 @@ describe("end to end", () => {
           "click button[title^='Start this run']",
           "wait 2500",
         ].join("\n"),
-        script: `JSON.stringify({ strong: !!document.querySelector('.ev.text strong'), code: document.querySelector('.ev.text code')?.textContent, li: document.querySelectorAll('.ticketbody li').length, note: document.body.innerText.includes('Checked on mobile.') })`,
+        script: `JSON.stringify({ strong: !!document.querySelector('.ev.text strong'), code: document.querySelector('.ev.text code')?.textContent, li: document.querySelectorAll('.ticketbody li').length, note: document.body.innerText.includes('Checked on mobile.'), tokenInUrl: location.href.includes('token') })`,
         width: 1300,
         height: 900,
       });
       expect(r.failure).toBeUndefined();
-      expect(JSON.parse(r.scriptResult!)).toEqual({ strong: true, code: "nothing", li: 2, note: true });
+      expect(JSON.parse(r.scriptResult!)).toEqual({ strong: true, code: "nothing", li: 2, note: true, tokenInUrl: false });
       expect(app.store.getRepo("e2e")!.notes).toBe("Prefer the Edit tool.");
       expect(app.store.events(runId).some((e) => e.kind === "review.note" && (e.data as any).text === "Checked on mobile.")).toBe(true);
       // window.open of the preview is a popup, which the checking browser closes and records.
       const info = app.runs.previews.info(runId);
       expect(info?.running).toBe(true);
       expect(r.blocked.some((b) => b.startsWith(`popup ${info!.origin}`))).toBe(true);
+    }, 60000);
+
+    test.skipIf(!chrome)("without the token the dashboard asks for the link; pasting it into the open tab signs in (headless Chrome)", async () => {
+      // Each check is a fresh Chrome profile, so nothing is in localStorage yet.
+      const r = await browser.check({
+        url: `${dash}/`,
+        steps: "waitfor .placeholder",
+        script: `(async () => {
+          const asked = document.body.innerText.includes("acutis dashboard");
+          location.hash = "token=${app.token}";
+          for (let i = 0; i < 50 && !document.querySelector(".layout .side"); i++) await new Promise((r) => setTimeout(r, 100));
+          for (let i = 0; i < 50 && !document.body.innerText.includes("E2E"); i++) await new Promise((r) => setTimeout(r, 100));
+          return JSON.stringify({ asked, signedIn: document.body.innerText.includes("E2E"), tokenInUrl: location.href.includes("token"), stored: localStorage.getItem("acutis-token") === "${app.token}" });
+        })()`,
+        width: 1300,
+        height: 900,
+      });
+      expect(r.failure).toBeUndefined();
+      expect(JSON.parse(r.scriptResult!)).toEqual({ asked: true, signedIn: true, tokenInUrl: false, stored: true });
     }, 60000);
   }
 });

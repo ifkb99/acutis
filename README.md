@@ -18,8 +18,11 @@ previews and browser checks.
 
 With the sandbox on, the agent's shell commands, the repo's gates and the preview
 server can write only inside the run's workspace. The agent's internet requests
-become per-host permission requests. Gates get no network at all, so worker-written
-tests can't reach the internet or the Acutis API. Without it, Acutis still runs,
+become per-host permission requests. Gates and the preview server get their own empty
+network, so worker-written tests and dev servers can't reach the internet, the Acutis API
+or anything else listening on TCP on your localhost. Acutis relays the preview's port to the host, so your browser
+and the checks still reach it. A preview that needs the internet, such as one that loads fonts from a CDN, won't
+get it. Without the sandbox, Acutis still runs,
 but its permission checks are guard rails, not a boundary. `acutis serve` prints
 which mode you're in.
 
@@ -71,10 +74,11 @@ which run on the host before the agent starts.
 ```sh
 bun install
 bun src/cli.ts repo add ~/Workspace/some-web-app --init-jj   # --init-jj only for plain git repos
-bun src/cli.ts serve                                          # http://127.0.0.1:7777
+bun src/cli.ts serve                                          # prints the dashboard link
 ```
 
-Then add a ticket in the dashboard (or `bun src/cli.ts ticket add <repo> "Title" --body "..."`)
+Open the link `serve` prints. It carries the API token (`#token=…`, kept in `$ACUTIS_HOME/token`),
+which every API call needs. `bun src/cli.ts dashboard` prints it again. Then add a ticket in the dashboard (or `bun src/cli.ts ticket add <repo> "Title" --body "..."`)
 and press **Start**.
 
 Everything the dashboard does is also on the CLI (`bun src/cli.ts` lists it), e.g.:

@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from "bun";
 import type { App } from "../app";
 import { RunError } from "../core/runs";
+import { tokenMatches } from "../core/token";
 import dashboard from "../dashboard/index.html";
 
 const json = (data: unknown, status = 200) => Response.json(data, { status });
@@ -22,13 +23,18 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
     for (const ws of sockets) ws.send(msg);
   });
 
+  const bearer = (req: Request) => req.headers.get("authorization")?.match(/^Bearer (\S+)$/)?.[1] ?? null;
+
   /**
-   * The API can make an agent run commands, so it only answers same-machine requests:
-   * the Host check blocks DNS rebinding and the custom header blocks cross-site form posts.
+   * The API can make an agent run commands. Every /api and /ws request needs the daemon's token
+   * ($ACUTIS_HOME/token), because any local process can reach this port, including a worker's
+   * preview server. The Host check blocks DNS rebinding, and the custom header and Origin check
+   * block cross-site requests from pages in the operator's browser.
    */
-  function guard(req: Request): Response | null {
+  function guard(req: Request, given = bearer(req)): Response | null {
     const host = req.headers.get("host") ?? "";
     if (!allowedHosts.has(host)) return json({ error: "bad host" }, 403);
+    if (!tokenMatches(app.token, given)) return json({ error: "missing or wrong token" }, 401);
     if (req.method !== "GET") {
       if (req.headers.get("x-acutis") !== "1") return json({ error: "missing x-acutis header" }, 403);
       const origin = req.headers.get("origin");
@@ -168,7 +174,8 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
     fetch(req, server) {
       const url = new URL(req.url);
       if (url.pathname === "/ws") {
-        const blocked = guard(req);
+        // Browsers can't set headers on a WebSocket, so the dashboard passes the token in the query.
+        const blocked = guard(req, url.searchParams.get("token") ?? bearer(req));
         if (blocked) return blocked;
         // Browsers let any page open a WebSocket to localhost, so require our own origin.
         const origin = req.headers.get("origin");

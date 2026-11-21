@@ -5,12 +5,47 @@ import { Markdown } from "./markdown";
 
 // ------------------------------------------------------------------- api
 
+/**
+ * The API needs the daemon's token. It arrives once in the link `acutis serve` prints
+ * (`#token=…`) and is kept in localStorage, which is per origin (port included), so a preview
+ * on another port can't read it. A cookie wouldn't do: cookies ignore the port, so the browser
+ * would send it to the worker-written preview server too.
+ */
+const TOKEN_KEY = "acutis-token";
+
+/** Take a `#token=…` out of the URL (so it isn't left in history or a copied link) and keep it. */
+function tokenFromHash(): string | null {
+  const m = location.hash.match(/(?:^#|&)token=([^&]+)/);
+  if (!m) return null;
+  const t = decodeURIComponent(m[1]!);
+  try {
+    localStorage.setItem(TOKEN_KEY, t);
+  } catch {}
+  const rest = location.hash.replace(/(^#|&)token=[^&]+/, "$1").replace(/^#&/, "#").replace(/&$/, "");
+  history.replaceState(null, "", location.pathname + location.search + (rest === "#" ? "" : rest));
+  return t;
+}
+
+function storedToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+let token = tokenFromHash() ?? storedToken();
+const authHeaders = (): Record<string, string> => (token ? { authorization: `Bearer ${token}` } : {});
+
+class AuthError extends Error {}
+
 async function api<T = any>(path: string, method = "GET", body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
-    headers: { "content-type": "application/json", "x-acutis": "1" },
+    headers: { "content-type": "application/json", "x-acutis": "1", ...authHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (res.status === 401) throw new AuthError("The dashboard needs a fresh token.");
   const ct = res.headers.get("content-type") ?? "";
   const data = ct.includes("json") ? await res.json() : await res.text();
   if (!res.ok) throw new Error((data as any)?.error ?? `HTTP ${res.status}`);
@@ -22,16 +57,18 @@ type HubMessage =
   | { type: "run"; run: Run }
   | { type: "ticket"; ticket: Ticket };
 
-function useHub(onMessage: (m: HubMessage) => void) {
+function useHub(onMessage: (m: HubMessage) => void, enabled: boolean) {
   const ref = useRef(onMessage);
   ref.current = onMessage;
   const [connected, setConnected] = useState(false);
   useEffect(() => {
+    if (!enabled) return;
     let ws: WebSocket | null = null;
     let stop = false;
     let retry: ReturnType<typeof setTimeout>;
     const connect = () => {
-      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+      if (!token) return;
+      ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?token=${encodeURIComponent(token)}`);
       ws.onopen = () => setConnected(true);
       ws.onmessage = (e) => ref.current(JSON.parse(e.data));
       ws.onclose = () => {
@@ -45,7 +82,7 @@ function useHub(onMessage: (m: HubMessage) => void) {
       clearTimeout(retry);
       ws?.close();
     };
-  }, []);
+  }, [enabled]);
   return connected;
 }
 
@@ -70,6 +107,7 @@ function App() {
     return m ? Number(m[1]) : null;
   });
   const [error, setError] = useState<string | null>(null);
+  const [needsToken, setNeedsToken] = useState(!token);
   const [pending, setPending] = useState<Map<string, number>>(new Map());
   const eventSink = useRef<((e: RunEvent) => void) | null>(null);
 
@@ -84,7 +122,21 @@ function App() {
   }, []);
 
   useEffect(() => {
-    reload().catch((e) => setError(e.message));
+    if (!token) return; // nothing to ask with; the sign-in screen is already showing
+    reload().catch((e) => (e instanceof AuthError ? setNeedsToken(true) : setError(e.message)));
+  }, [reload]);
+
+  // Pasting the login link into an open tab only changes the hash, which doesn't reload the page.
+  useEffect(() => {
+    const onHash = () => {
+      const t = tokenFromHash();
+      if (!t) return;
+      token = t;
+      setNeedsToken(false);
+      reload().catch((e) => (e instanceof AuthError ? setNeedsToken(true) : setError(e.message)));
+    };
+    addEventListener("hashchange", onHash);
+    return () => removeEventListener("hashchange", onHash);
   }, [reload]);
 
   useEffect(() => {
@@ -106,7 +158,7 @@ function App() {
       }
       eventSink.current?.(e);
     }
-  });
+  }, !needsToken);
 
   // Pending permission requests show in the tab title, so a waiting run is visible from other tabs.
   useEffect(() => {
@@ -131,7 +183,8 @@ function App() {
     try {
       await fn();
     } catch (e) {
-      setError((e as Error).message);
+      if (e instanceof AuthError) setNeedsToken(true);
+      else setError((e as Error).message);
     }
   }, []);
 
@@ -143,6 +196,17 @@ function App() {
     });
 
   const run = selected ? runs.get(selected) ?? null : null;
+
+  if (needsToken) {
+    return (
+      <div className="placeholder">
+        <p>This dashboard needs the Acutis API token.</p>
+        <p>
+          Open the link that <code>acutis serve</code> printed, or get it again with <code>acutis dashboard</code>.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="layout">
@@ -574,11 +638,29 @@ function Timeline({ events, root }: { events: RunEvent[]; root: string | null })
   );
 }
 
+/** Artifacts need the token, which an <img src> can't send, so fetch them and show a blob URL. */
 function Shot({ runId, name, caption }: { runId: number; name: string; caption?: string }) {
-  const src = `/api/runs/${runId}/artifacts/${encodeURIComponent(name)}`;
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    let url: string | null = null;
+    fetch(`/api/runs/${runId}/artifacts/${encodeURIComponent(name)}`, { headers: authHeaders() })
+      .then((r) => (r.ok ? r.blob() : Promise.reject()))
+      .then((b) => {
+        if (!live) return;
+        url = URL.createObjectURL(b);
+        setSrc(url);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [runId, name]);
+  if (!src) return <span className="shot">loading screenshot…</span>;
   return (
     <a className="shot" href={src} target="_blank" rel="noreferrer noopener" title={caption}>
-      <img src={src} alt={caption ?? "screenshot"} loading="lazy" />
+      <img src={src} alt={caption ?? "screenshot"} />
     </a>
   );
 }
