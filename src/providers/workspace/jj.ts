@@ -1,5 +1,5 @@
 import { $ } from "bun";
-import { existsSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, rmSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Repo, Workspace, WorkspaceProvider } from "../../core/types";
 
@@ -43,6 +43,41 @@ async function jj(cwd: string, args: string[], retryStale = true): Promise<strin
   return res.stdout.toString();
 }
 
+/**
+ * While a sandboxed command runs, Claude Code mounts read-only empty files over config paths in
+ * the workspace (`.bashrc`, `.gitconfig`, `.gitmodules`, `.mcp.json`, `.claude/settings.json`…) so
+ * they can't be written. A jj snapshot taken meanwhile, or after the session died, would record
+ * them as part of the change. Before diffing or landing, delete files that look exactly like
+ * that (empty, not owner-writable, at the top level or in `.claude/`) unless the base tracks them.
+ */
+export async function prunePlaceholders(wsPath: string, baseCommit: string): Promise<string[]> {
+  const candidates: string[] = [];
+  for (const dir of ["", ".claude"]) {
+    let names: string[] = [];
+    try {
+      names = readdirSync(`${wsPath}/${dir}`);
+    } catch {
+      continue;
+    }
+    for (const n of names) {
+      const rel = dir ? `${dir}/${n}` : n;
+      try {
+        const st = lstatSync(`${wsPath}/${rel}`);
+        if (st.isFile() && st.size === 0 && (st.mode & 0o200) === 0) candidates.push(rel);
+      } catch {}
+    }
+  }
+  if (!candidates.length) return [];
+  const tracked = new Set(
+    (await jj(wsPath, ["file", "list", "--ignore-working-copy", "-r", baseCommit, "--", ...candidates.map((c) => `root-file:"${c}"`)]).catch(() => ""))
+      .split("\n")
+      .filter(Boolean),
+  );
+  const removed = candidates.filter((c) => !tracked.has(c));
+  for (const c of removed) rmSync(`${wsPath}/${c}`, { force: true });
+  return removed;
+}
+
 export class JjWorkspaceProvider implements WorkspaceProvider {
   constructor(private workspacesRoot: string) {}
 
@@ -84,16 +119,19 @@ export class JjWorkspaceProvider implements WorkspaceProvider {
 
   async diff(_repo: Repo, ws: Workspace): Promise<string> {
     if (!existsSync(ws.path)) return "";
+    await prunePlaceholders(ws.path, ws.baseCommit);
     return jj(ws.path, ["diff", "--git", "--from", ws.baseCommit, "--to", "@"]);
   }
 
   async changedFiles(_repo: Repo, ws: Workspace): Promise<string[]> {
     if (!existsSync(ws.path)) return [];
+    await prunePlaceholders(ws.path, ws.baseCommit);
     const out = await jj(ws.path, ["diff", "--name-only", "--from", ws.baseCommit, "--to", "@"]);
     return out.split("\n").filter(Boolean);
   }
 
   async land(_repo: Repo, ws: Workspace, opts: { message: string; bookmark: string | null; push: boolean }) {
+    await prunePlaceholders(ws.path, ws.baseCommit);
     await jj(ws.path, ["describe", "-m", opts.message]);
     if (!opts.bookmark) return;
     await jj(ws.path, ["bookmark", "set", opts.bookmark, "-r", "@", "--allow-backwards"]);

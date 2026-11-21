@@ -190,6 +190,15 @@ There are two separate questions: where the agent loop runs, and where the app r
     (`workerEnv`), sandbox or not. `setup:` steps run on the host: they are
     trunk policy, run before the worker has touched anything, and usually
     need the network.
+  - **Bash under the sandbox is auto-approved** in `canUseTool`. Claude Code still raises prompts for
+    commands it can't statically check (heredocs, `( … )` groups, variables), but with unsandboxed
+    retries off they run in bubblewrap anyway. In the trials those prompts were 7 of the first 7 and
+    guarded nothing. Network access is a separate `SandboxNetworkAccess` request and still asks.
+  - **Sandbox placeholder files.** While a sandboxed command runs, Claude Code mounts empty read-only
+    files over config paths in the workspace (`.bashrc`, `.gitmodules`, `.mcp.json`,
+    `.claude/settings.json`…). The jj provider deletes untracked files of exactly that shape
+    before diffing or landing, so a snapshot can never record them. They still confuse tools
+    that walk the tree (`prettier .` crashed in one run); not mounting them at all is open.
   - The sandbox only wraps shell commands, and it still allows *reads* across
     the machine. Deny-read `~/.ssh`, `~/.aws`, `~/.claude/.credentials.json`
     and other repos.

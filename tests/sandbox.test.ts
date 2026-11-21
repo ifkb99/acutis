@@ -117,3 +117,25 @@ describe.skipIf(!usable)("gates run worker-written code inside the sandbox", () 
     }
   }, 30000);
 });
+
+test("sandbox placeholder files never reach the diff, but tracked empty read-only files stay", async () => {
+  const { chmodSync } = await import("node:fs");
+  const { JjWorkspaceProvider } = await import("../src/providers/workspace/jj");
+  const { makeRepo } = await import("./helpers");
+  const repoPath = await makeRepo({ "README.md": "hi\n", ".keep-me": "" });
+  const provider = new JjWorkspaceProvider(tempDir("acutis-ws-"));
+  const repo = { name: "demo", path: repoPath, base: "main", notes: "" } as any;
+  const base = await provider.resolve(repo, "main");
+  const ws = await provider.create(repo, "w1", base);
+  chmodSync(`${ws.path}/.keep-me`, 0o444); // tracked: must survive even though it looks like a placeholder
+  mkdirSync(`${ws.path}/.claude`, { recursive: true });
+  for (const f of [".bashrc", ".gitmodules", ".mcp.json", ".claude/settings.json"]) {
+    writeFileSync(`${ws.path}/${f}`, "");
+    chmodSync(`${ws.path}/${f}`, 0o444);
+  }
+  writeFileSync(`${ws.path}/real.txt`, "work\n");
+  writeFileSync(`${ws.path}/.empty-but-writable`, ""); // an ordinary new empty file is the worker's
+  expect((await provider.changedFiles(repo, ws)).sort()).toEqual([".empty-but-writable", "real.txt"]);
+  expect(existsSync(`${ws.path}/.keep-me`)).toBe(true);
+  expect(existsSync(`${ws.path}/.bashrc`)).toBe(false);
+});
