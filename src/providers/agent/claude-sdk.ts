@@ -118,12 +118,6 @@ class ClaudeSdkSession implements AgentSession {
         if (mcpServer?.source === "sdk" && mcpServer.name === "acutis" && toolNames.has(toolName)) {
           return { behavior: "allow", updatedInput: input };
         }
-        // Under the sandbox every Bash command runs inside bubblewrap (unsandboxed retries are off), so
-        // the prompts Claude Code still raises for commands it can't statically check (heredocs,
-        // subshells, variables) guard nothing. Network access is a separate request and still asks.
-        if (sandbox && toolName === "Bash" && !input.dangerouslyDisableSandbox) {
-          return { behavior: "allow", updatedInput: input };
-        }
         if (FILE_TOOLS.has(toolName)) {
           const p = (input.file_path ?? input.notebook_path) as string | undefined;
           if (p && !isInside(cwd, p)) {
@@ -138,6 +132,12 @@ class ClaudeSdkSession implements AgentSession {
           if (home && SECRET_PATHS.some((p) => abs === `${home}/${p}` || abs.startsWith(`${home}/${p}/`))) {
             return { behavior: "deny", message: `Acutis: credential paths are off-limits (${target}).` };
           }
+        }
+        // After the credential check above. Under the sandbox every Bash command runs inside bubblewrap (unsandboxed retries are off), so
+        // the prompts Claude Code still raises for commands it can't statically check (heredocs,
+        // subshells, variables) guard nothing. Network access is a separate request and still asks.
+        if (sandbox && toolName === "Bash" && !input.dangerouslyDisableSandbox) {
+          return { behavior: "allow", updatedInput: input };
         }
         if (signal.aborted) return { behavior: "deny", message: "aborted" };
         const decision = await spec.onPermission({

@@ -68,11 +68,13 @@ export async function prunePlaceholders(wsPath: string, baseCommit: string): Pro
     }
   }
   if (!candidates.length) return [];
-  const tracked = new Set(
-    (await jj(wsPath, ["file", "list", "--ignore-working-copy", "-r", baseCommit, "--", ...candidates.map((c) => `root-file:"${c}"`)]).catch(() => ""))
-      .split("\n")
-      .filter(Boolean),
-  );
+  let listed: string;
+  try {
+    listed = await jj(wsPath, ["file", "list", "--ignore-working-copy", "-r", baseCommit, "--", ...candidates.map((c) => `root-file:"${c}"`)]);
+  } catch {
+    return []; // can't tell what the base tracks: delete nothing
+  }
+  const tracked = new Set(listed.split("\n").filter(Boolean));
   const removed = candidates.filter((c) => !tracked.has(c));
   for (const c of removed) rmSync(`${wsPath}/${c}`, { force: true });
   return removed;
