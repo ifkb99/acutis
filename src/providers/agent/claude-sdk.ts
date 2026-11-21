@@ -273,6 +273,24 @@ class ClaudeSdkSession implements AgentSession {
     await this.q.interrupt();
   }
 
+  /**
+   * The session's running cost, mid-turn included. Results only report it when a turn ends, so
+   * this is what makes cost live and lets a killed turn be counted. It uses the SDK's experimental
+   * usage call (verified on 0.3.329: ~150ms mid-turn, the same running total results carry);
+   * if that call changes or fails, cost just goes back to updating per turn.
+   */
+  async totalCost(): Promise<number | null> {
+    if (this.closed) return null;
+    const usage = (this.q as any).usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (typeof usage !== "function") return null;
+    try {
+      const total = (await usage.call(this.q, { skipBehaviors: true }))?.session?.total_cost_usd;
+      return typeof total === "number" && Number.isFinite(total) ? total : null;
+    } catch {
+      return null;
+    }
+  }
+
   close(): void {
     this.closed = true;
     this.wake?.();

@@ -160,10 +160,11 @@ where the worker showed my concern was wrong. The other was a default I reversed
      the session D-Bus (`systemd-run --user` runs a process outside the sandbox) and `/var/run/docker.sock` both connected.
      `/run` is now hidden (stopgap); sockets under `$HOME` and elsewhere remain. See `notes/container-sandbox-plan.md`.
   2. **Placeholder files still confuse tree-walking tools** inside the agent's sandbox (`prettier .`). Find a way not to mount them.
-  3. **No concurrency or resource limits** (a cargo exit 137 under 4 concurrent runs).
-  4. **Killed-turn cost** is still invisible (the restart showed $0.00 for interrupted turns).
-  5. **Agent sandbox vs gate sandbox differ:** `tsx` IPC works in gates but not for the agent, so agents had to work around it.
-     Aligning them (or documenting it in the worker prompt) would save turns.
+  3. ~~**No concurrency or resource limits**~~ **Run limit done (2026-11-21):** `ACUTIS_MAX_RUNS` (default 4), extra runs queue.
+     The exit 137 wasn't an OOM kill: there's no kernel OOM record for Nov 20, so it was likely the Bash tool's timeout. Resource limits (memory, CPU) are still open.
+  4. ~~**Killed-turn cost** is still invisible~~ **Done (2026-11-21):** cost is polled live, before a kill, and after a resume.
+  5. ~~**Agent sandbox vs gate sandbox differ**~~ **Documented (2026-11-21):** the worker prompt says the agent's shell has no Unix
+     sockets (Claude Code blocks them) and to use `node --import tsx`. The two sandboxes still differ.
   6. **The reviewer still has to judge "owner decisions"** (run 9's default). A workflow field like `ask_before:` ("changing
      defaults that affect the web app or training") could make workers stop and ask instead.
   7. Small: `watch` labels gates by command, not name; a "re-run setup" gate would catch setup-breaking changes.

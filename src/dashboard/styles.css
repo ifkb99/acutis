@@ -110,6 +110,7 @@ code, pre { font-family: var(--mono); font-size: 12.5px; }
 .chip.done { color: var(--ok); border-color: var(--ok); }
 .chip.failed { color: var(--err); border-color: var(--err); }
 .chip.cancelled { color: var(--muted); }
+.chip.queued { color: var(--muted); border-style: dashed; }
 
 /* main */
 .main { display: flex; flex-direction: column; min-width: 0; height: 100%; overflow: hidden; }

@@ -123,6 +123,15 @@ A redirect is `interrupt()` followed by a new user message. The SDK ends the
 interrupted response with `error_during_execution`. The run treats that as
 expected while a redirect is pending, not as a failure.
 
+**Run limit (2026-11-21).** At most `ACUTIS_MAX_RUNS` runs (default 4; 0 = no
+limit) hold a slot, i.e. are preparing, running, verifying or landing. A new run
+past the limit is `queued` and starts, oldest first, when a run leaves those
+states (review, pause, failure, kill). Slots are counted from the store and freed
+in one place, `setState`. Queued runs survive a restart. A queued run that can't
+start fails rather than blocking the queue. The limit gates only *new* runs:
+resume, send-back and approve start at once, so they can briefly exceed it. After
+a restart, queued runs take the slots while the old running runs sit paused.
+
 ## 4. Agent runner and auth
 
 - **Implementation:** `@anthropic-ai/claude-agent-sdk` in streaming-input
@@ -349,6 +358,22 @@ The dashboard lists runs grouped by state. Each run shows:
 
 - **Cost:** the SDK's `total_cost_usd` is a running total per `query()` (and a resumed session
   continues from its saved total). Runs add the delta per result, not the total.
+- **Live and killed-turn cost (2026-11-21).** Results only arrive when a turn ends, so a killed turn
+  (and the turn cut off by a restart) showed $0.00. The session is now polled for its running total
+  (`AgentSession.totalCost`): at most every 5s while it emits events, once more before a kill closes
+  it (capped at 2s), and right after a resumed session starts. The SDK has no stable call for this.
+  `totalCost` uses `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET` (verified on 0.3.329:
+  about 150ms mid-turn, the same running total results carry). If it breaks, cost goes back to
+  updating per turn. The last total seen is stored per run (`session_cost`), because a resumed session's
+  restored total includes spend after our last look: a probe polled $0.00013, closed mid-turn, and
+  resumed at $0.0119. Comparing with `session_cost` counts that tail once, and it is logged as
+  "spent in an earlier, interrupted turn". A poll reply that a turn result overtook is ignored, and
+  a resumed session's first total that comes back *below* what was counted rebaselines without adding.
+  Each turn's `turn_cost_usd` still covers the whole turn. A kill only waits for the poll while the
+  agent is mid-turn (`running`): in any other state, waiting would let a killed check be reported
+  as a failure. **Verified 2026-11-21 with the real runner:** cost rose live ($0.09 → $0.11) and a
+  killed run kept it. A daemon SIGTERM'd mid-turn at $0.098 resumed, recovered $0.007, and ended at
+  $0.143, equal to the session's own total.
 - **Sandbox off:** a PreToolUse hook sends any Bash command that names a user-writable path
   outside the workspace (`/tmp`, `$HOME`, `../…`) to the operator, even if the command is
   allowlisted (verified: a hook `ask` overrides an `allowedTools` match). It is a heuristic:

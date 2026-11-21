@@ -173,6 +173,13 @@ function App() {
     wasConnected.current = connected;
   }, [connected, reload]);
 
+  // Queued runs start oldest first, so a run's place in line is its rank among queued runs.
+  const queuePos = useMemo(() => {
+    const m = new Map<number, number>();
+    [...runs.values()].filter((r) => r.state === "queued").sort((a, b) => a.id - b.id).forEach((r, i) => m.set(r.id, i + 1));
+    return m;
+  }, [runs]);
+
   const latestRun = useMemo(() => {
     const m = new Map<number, Run>();
     for (const r of [...runs.values()].sort((a, b) => a.id - b.id)) m.set(r.ticket_id, r);
@@ -240,7 +247,7 @@ function App() {
                     </div>
                     <div className="meta">
                       <span>{t.repo}</span>
-                      {r && <span className={`chip ${r.state}`}>{r.state.replace("_", " ")}</span>}
+                      {r && <span className={`chip ${r.state}`}>{stateLabel(r, queuePos)}</span>}
                       {r && pendingRuns.has(r.id) && <span className="chip needs">needs you</span>}
                       <span style={{ flex: 1 }} />
                       {t.status === "todo" && (
@@ -289,6 +296,7 @@ function App() {
             ticket={tickets.get(run.ticket_id) ?? null}
             eventSink={eventSink}
             act={act}
+            queuePos={queuePos}
           />
         ) : (
           <div className="placeholder">
@@ -398,16 +406,23 @@ function readPng(file: Blob): Promise<string> {
 
 // ------------------------------------------------------------------- run view
 
+function stateLabel(run: Run, queuePos: Map<number, number>): string {
+  if (run.state === "queued") return queuePos.has(run.id) ? `queued · #${queuePos.get(run.id)} in line` : "queued";
+  return run.state.replace("_", " ");
+}
+
 function RunView({
   run,
   ticket,
   eventSink,
   act,
+  queuePos,
 }: {
   run: Run;
   ticket: Ticket | null;
   eventSink: React.MutableRefObject<((e: RunEvent) => void) | null>;
   act: (fn: () => Promise<unknown>) => Promise<void>;
+  queuePos: Map<number, number>;
 }) {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [perms, setPerms] = useState<PermissionRequest[]>([]);
@@ -466,14 +481,16 @@ function RunView({
           <h2>
             #{run.ticket_id} {ticket?.title ?? ""}
           </h2>
-          <span className={`chip ${s}`}>{s.replace("_", " ")}</span>
+          <span className={`chip ${s}`} title={s === "queued" ? "The daemon's run limit (ACUTIS_MAX_RUNS) is reached; this run starts when another finishes, pauses or reaches review." : undefined}>
+            {stateLabel(run, queuePos)}
+          </span>
         </div>
         <div className="facts">
           <span>run {run.id}</span>
           <span>{run.repo}</span>
           {run.model && <span>{run.model}</span>}
           <span>attempt {run.attempt}</span>
-          <span title="API-equivalent estimate; billed against your subscription. Updated when each turn ends.">≈${run.cost_usd.toFixed(2)}</span>
+          <span title="API-equivalent estimate; billed against your subscription. Updated live while the agent works.">≈${run.cost_usd.toFixed(2)}</span>
           {run.gates_ok !== null && <span style={{ color: run.gates_ok ? "var(--ok)" : "var(--err)" }}>checks {run.gates_ok ? "passed" : "failed"}</span>}
           {run.bookmark && <span>bookmark {run.bookmark}</span>}
           {run.workspace_path && <span title={run.workspace_path}>workspace {run.workspace_name}</span>}
@@ -493,6 +510,11 @@ function RunView({
           {run.workspace_path && !["done", "failed", "cancelled"].includes(s) && (
             <button className="btn" onClick={openPreview} title="Start this run's preview server (if the repo has one) and open it">
               Open preview
+            </button>
+          )}
+          {s === "queued" && (
+            <button className="btn danger" onClick={() => post("kill")}>
+              Remove from queue
             </button>
           )}
           {["preparing", "running", "paused", "verifying", "awaiting_review"].includes(s) && (

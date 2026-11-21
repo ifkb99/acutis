@@ -25,6 +25,7 @@ export interface Ticket {
 }
 
 export type RunState =
+  | "queued"
   | "preparing"
   | "running"
   | "paused"
@@ -35,7 +36,9 @@ export type RunState =
   | "failed"
   | "cancelled";
 
-export const ACTIVE_STATES: RunState[] = ["preparing", "running", "paused", "verifying", "landing"];
+export const ACTIVE_STATES: RunState[] = ["queued", "preparing", "running", "paused", "verifying", "landing"];
+/** States that take one of the daemon's run slots (`maxRuns`). Paused and in-review runs don't. */
+export const SLOT_STATES: RunState[] = ["preparing", "running", "verifying", "landing"];
 export const TERMINAL_STATES: RunState[] = ["done", "failed", "cancelled"];
 
 export interface Run {
@@ -51,6 +54,11 @@ export interface Run {
   attempt: number;
   gates_ok: number | null; // 1 pass, 0 fail, null not run
   cost_usd: number;
+  /**
+   * Last running total seen from the run's agent session (the SDK reports totals, not deltas).
+   * Kept across restarts, so a resumed session's total is compared with what was already counted.
+   */
+  session_cost: number | null;
   error: string | null;
   bookmark: string | null;
   created_at: string;
@@ -182,6 +190,8 @@ export interface AgentSession {
   interrupt(): Promise<void>;
   /** End the session and its process. */
   close(): void;
+  /** The session's running cost total so far, mid-turn included; null if unavailable. */
+  totalCost?(): Promise<number | null>;
 }
 
 export interface AgentRunner {

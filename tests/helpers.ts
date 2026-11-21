@@ -32,6 +32,10 @@ export interface FakeControls {
   closed: boolean;
   /** End the turn. `cost` is the session's running total, like the real SDK reports. */
   result(subtype?: string, cost?: number): void;
+  /** Set the running total that totalCost() reports mid-turn (undefined: report nothing). */
+  setTotal(total: number | undefined): void;
+  /** While set, totalCost() waits for it before answering (to simulate a slow poll). */
+  holdTotal: Promise<void> | null;
 }
 
 export type FakeScript = (c: FakeControls) => Promise<void>;
@@ -44,6 +48,9 @@ class FakeSession implements AgentSession {
   private msgWake: (() => void) | null = null;
   private intWake: (() => void) | null = null;
   readonly sent: string[] = [];
+  total: number | undefined;
+  holdTotal: Promise<void> | null = null;
+  totalCalls = 0;
   readonly events: AsyncIterable<AgentEvent>;
   closed = false;
 
@@ -71,6 +78,13 @@ class FakeSession implements AgentSession {
       interrupted: () => new Promise<void>((r) => (this.intWake = r)),
       get closed() {
         return self.closed;
+      },
+      setTotal: (t) => (this.total = t),
+      get holdTotal() {
+        return self.holdTotal;
+      },
+      set holdTotal(p) {
+        self.holdTotal = p;
       },
       result: (subtype = "success", cost = 0.01) =>
         this.push({ kind: "agent.result", subtype, result: "", is_error: subtype !== "success", cost_usd: cost, turns: 1, duration_ms: 5 }),
@@ -102,6 +116,12 @@ class FakeSession implements AgentSession {
   close() {
     this.closed = true;
     this.push({ kind: "agent.exit" });
+  }
+  async totalCost(): Promise<number | null> {
+    this.totalCalls++;
+    const total = this.total; // read when asked, like a real poll; answered after any hold
+    if (this.holdTotal) await this.holdTotal;
+    return total ?? null;
   }
 }
 

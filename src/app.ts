@@ -13,16 +13,22 @@ import { JjWorkspaceProvider } from "./providers/workspace/jj";
 export interface Config {
   home: string;
   port: number;
+  /** Runs that may be preparing, running, verifying or landing at once; 0 means no limit. */
+  maxRuns?: number;
 }
 
 export function loadConfig(): Config {
   return {
     home: process.env.ACUTIS_HOME ?? `${process.env.XDG_DATA_HOME ?? `${homedir()}/.local/share`}/acutis`,
     port: Number(process.env.ACUTIS_PORT ?? 7777),
+    maxRuns: Math.max(0, Math.floor(Number(process.env.ACUTIS_MAX_RUNS ?? 4)) || 0),
   };
 }
 
-export function createApp(cfg: Config, opts: { runner?: AgentRunner; browser?: BrowserProvider; commandSandbox?: CommandSandbox } = {}) {
+export function createApp(
+  cfg: Config,
+  opts: { runner?: AgentRunner; browser?: BrowserProvider; commandSandbox?: CommandSandbox; costPollMs?: number } = {},
+) {
   const store = new Store(`${cfg.home}/acutis.db`);
   const hub = new Hub(store);
   const tickets = new LocalTicketSource(store);
@@ -34,7 +40,19 @@ export function createApp(cfg: Config, opts: { runner?: AgentRunner; browser?: B
   const browser = opts.browser ?? new ChromeBrowser();
   // Gates and previews run worker-written code: confine them whenever the agent itself is sandboxed.
   const commandSandbox = opts.commandSandbox ?? (sandbox ? new BwrapSandbox({ hide: [cfg.home] }) : undefined);
-  const runs = new RunManager({ store, hub, tickets, workspaces, runner, browser, artifactsDir: `${cfg.home}/artifacts`, commandSandbox });
+  const runs = new RunManager({
+    store,
+    hub,
+    tickets,
+    workspaces,
+    runner,
+    browser,
+    artifactsDir: `${cfg.home}/artifacts`,
+    commandSandbox,
+    agentSandboxed: sandbox,
+    maxRuns: cfg.maxRuns ?? 0,
+    costPollMs: opts.costPollMs,
+  });
   return { cfg, store, hub, tickets, workspaces, runner, runs, browser, sandbox, sandboxStatus, token };
 }
 
