@@ -488,7 +488,7 @@ function DecisionsPanel({
 }: {
   open: RankedDecision[];
   decided: Decision[];
-  onDecide: (id: number, body: { decision: string; version: number; keep: number[] }) => void;
+  onDecide: (id: number, body: { decision: string; version: number; keep: number[]; drop: number[] }) => void;
   onWithdraw: (id: number) => void;
 }) {
   if (!open.length && !decided.length) return null;
@@ -523,7 +523,7 @@ function DecisionCard({
   onWithdraw,
 }: {
   d: RankedDecision;
-  onDecide: (id: number, body: { decision: string; version: number; keep: number[] }) => void;
+  onDecide: (id: number, body: { decision: string; version: number; keep: number[]; drop: number[] }) => void;
   onWithdraw: (id: number) => void;
 }) {
   const [text, setText] = useState("");
@@ -554,7 +554,7 @@ function DecisionCard({
       )}
       {d.held_tickets.length > 0 && (
         <div className="held">
-          <div className="muted">Tickets waiting on this (checked ones go to todo):</div>
+          <div className="muted">Tickets waiting on this (checked go to todo, unchecked are dropped):</div>
           {d.held_tickets.map((t) => (
             <label key={t.id} className="row">
               <input
@@ -573,9 +573,21 @@ function DecisionCard({
           ))}
         </div>
       )}
-      <textarea placeholder="Your decision, as workers should follow it" value={text} onChange={(e) => setText(e.target.value)} rows={2} />
+      <textarea
+        placeholder="Your decision, written to stand alone (e.g. 'Support phones from 390px wide.'); workers follow it"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={2}
+      />
       <div className="row">
-        <button className="btn primary" disabled={!text.trim()} onClick={() => onDecide(d.id, { decision: text.trim(), version: d.version, keep: [...keep] })}>
+        <button className="btn primary" disabled={!text.trim()} onClick={() =>
+            onDecide(d.id, {
+              decision: text.trim(),
+              version: d.version,
+              keep: [...keep],
+              drop: d.held_tickets.map((t) => t.id).filter((id) => !keep.has(id)),
+            })
+          }>
           Decide
         </button>
         <button className="btn" onClick={() => onWithdraw(d.id)} title="Drop the question; held tickets go back to Proposed">

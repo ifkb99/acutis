@@ -105,7 +105,7 @@ export interface TicketSource {
   claim(id: number): boolean;
   setStatus(id: number, status: TicketStatus): Ticket;
   /** Move tickets held on one decision to another (merged questions), or back to proposed (null). */
-  moveHeld(fromDecision: number, toDecision: number | null): void;
+  moveHeld(fromDecision: number, toDecision: number | null): number[];
 }
 
 // ---- Workspaces -------------------------------------------------------------
@@ -203,6 +203,8 @@ export interface AgentSpec {
   resumeSessionId?: string;
   /** Factory-owned tools (preview, browser) offered to the worker. */
   tools?: AcutisTool[];
+  /** Hard spend cap for this session (scouts): the runner ends the turn with "error_max_budget_usd". */
+  maxBudgetUsd?: number;
   /** Called when a tool call needs a human decision. */
   onPermission: (req: PermissionRequest) => Promise<PermissionDecision>;
 }

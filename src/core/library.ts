@@ -203,13 +203,16 @@ export class Library {
   }
 
   /** Replace the repo's decisions (operator-written; few, and they change when superseded). */
-  setDecisions(repo: string, decisions: { id: number; question: string; decision: string }[]) {
+  setDecisions(repo: string, decisions: { id: number; question: string; decision: string; asked_by: string }[]) {
     const insert = this.db.query(
       "INSERT INTO library (heading, body, repo, commit_id, kind, ref, line) VALUES (?, ?, ?, '', 'decision', ?, 0)",
     );
     this.db.transaction(() => {
       this.db.query("DELETE FROM library WHERE repo = ? AND kind = 'decision'").run(repo);
-      for (const d of decisions) insert.run(d.question || "Operator decision", d.decision, repo, `decision #${d.id}`);
+      for (const d of decisions) {
+        const body = d.question ? `${d.decision}\n\n(Answers a question the ${d.asked_by} scout asked: ${d.question})` : d.decision;
+        insert.run("Operator decision", body, repo, `decision #${d.id}`);
+      }
     })();
   }
 

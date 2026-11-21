@@ -30,9 +30,10 @@ Repos and tickets
 Scouts and decisions
   acutis scout <repo> <type>                   Start a scout (infrastructure, tests); it files tickets and questions
   acutis decisions [--repo R] [--all]          Open questions, most held work first (--all: every decision)
-  acutis decide <id> --version N <text> [--keep 3,4]
+  acutis decide <id> --version N <text> [--keep 3,4] [--drop 5]
                                                Answer a question with the decision workers will follow;
-                                               held tickets listed in --keep go to todo, the rest are dropped
+                                               held tickets in --keep go to todo, --drop are cancelled,
+                                               any others go to proposed
   acutis decision add <repo> <text>            Record a decision directly
   acutis decision withdraw <id> | supersede <id> <text>
 
@@ -478,7 +479,7 @@ switch (cmd) {
         console.log(`\t${d.question}`);
         if (d.options) for (const o of String(d.options).split("\n").filter(Boolean)) console.log(`\t  - ${o}`);
         for (const t of d.held_tickets ?? []) console.log(`\t  holds #${t.id}: ${t.title}`);
-        console.log(`\tanswer: acutis decide ${d.id} --version ${d.version} "<your decision>"${d.held ? " --keep <ids>" : ""}`);
+        console.log(`\tanswer: acutis decide ${d.id} --version ${d.version} "<your decision, written to stand alone>"${d.held ? " [--keep <ids>] [--drop <ids>]" : ""}`);
       } else {
         console.log(`#${d.id}\t${d.status}\t${d.repo} · ${d.area}${d.question ? ` · ${d.question}` : ""}`);
         if (d.decision) console.log(`\t→ ${d.decision}${d.superseded_by ? ` (superseded by #${d.superseded_by})` : ""}`);
@@ -490,13 +491,13 @@ switch (cmd) {
     const { values, positionals } = parseArgs({
       args: [sub, ...rest].filter((x): x is string => x !== undefined),
       allowPositionals: true,
-      options: { version: { type: "string" }, keep: { type: "string" } },
+      options: { version: { type: "string" }, keep: { type: "string" }, drop: { type: "string" } },
     });
     const id = runArg(positionals[0], "acutis decide <id> --version N <text> [--keep 3,4]");
     const text = positionals.slice(1).join(" ");
     if (!values.version || !text) die("usage: acutis decide <id> --version N <text> [--keep 3,4]  (the version is shown by acutis decisions)");
-    const keep = (values.keep ?? "").split(",").filter(Boolean).map(Number);
-    const d = await post(`/api/decisions/${id}/decide`, { decision: text, version: Number(values.version), keep });
+    const list = (v?: string) => (v ?? "").split(",").filter(Boolean).map(Number);
+    const d = await post(`/api/decisions/${id}/decide`, { decision: text, version: Number(values.version), keep: list(values.keep), drop: list(values.drop) });
     console.log(`Decision #${d.id} recorded: ${d.decision}`);
     break;
   }

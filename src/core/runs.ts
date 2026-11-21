@@ -165,7 +165,10 @@ export class RunManager {
   /** Called once at daemon start: detach runs whose agent process died with the old daemon. */
   recover() {
     for (const run of this.deps.store.listRuns(1000)) {
-      if (run.state === "preparing") this.setState(run.id, "failed", "daemon restarted during preparation");
+      if (run.state === "preparing") {
+        this.setState(run.id, "failed", "daemon restarted during preparation");
+        this.releaseTicket(run.ticket_id); // or a scout's runner ticket stays "in progress" for good
+      }
       else if (run.state === "running" || run.state === "verifying") {
         this.setState(run.id, "paused", "daemon restarted; press Resume to continue the session");
       } else if (run.state === "landing") {
@@ -503,6 +506,8 @@ export class RunManager {
       deny: a.workflow.deny,
       resumeSessionId,
       tools: scout ? this.scoutTools(runId, scout) : this.agentTools(runId),
+      // A hard backstop under the live-cost stop: the SDK ends the turn at what's left of the budget.
+      maxBudgetUsd: scout ? Math.max(0.05, (settings?.budget_usd ?? DEFAULT_SCOUT_BUDGET_USD) - run.cost_usd) : undefined,
       onPermission: (req) => this.requestPermission(runId, req),
     });
     a.session = session;
@@ -562,6 +567,8 @@ export class RunManager {
             // A scout's turn ending is the scout finishing: no checks, no review, nothing lands.
             if (this.mustGet(runId).kind === "scout") this.finishScout(runId, this.scoutTally(a));
             else await this.verify(runId);
+          } else if (ev.subtype === "error_max_budget_usd" && this.mustGet(runId).kind === "scout") {
+            this.finishScout(runId, `stopped at its budget; ${this.scoutTally(a)}`);
           } else {
             this.closeSession(a);
             this.fail(runId, new Error(`agent ended with "${ev.subtype}"${ev.errors?.length ? `: ${ev.errors.join("; ")}` : ""}`));
@@ -1082,10 +1089,16 @@ ${this.workSnapshot(repo)}`;
     const repo = this.deps.store.getRepo(run.repo);
     if (!repo || !run.workspace_name || !run.workspace_path || !run.base_commit) return;
     const ws = { name: run.workspace_name, path: run.workspace_path, baseCommit: run.base_commit };
-    this.deps.store.updateRun(run.id, { workspace_path: null });
-    this.deps.workspaces.destroy(repo, ws, { abandon: true }).catch((e) =>
-      this.deps.hub.emit(run.id, "system.log", { level: "warn", msg: `couldn't remove the scout's workspace: ${(e as Error).message}` }),
-    );
+    // The path is forgotten only once the directory is gone, so a failed removal can still be discarded.
+    this.deps.workspaces
+      .destroy(repo, ws, { abandon: true })
+      .then(() => this.deps.hub.run(this.deps.store.updateRun(run.id, { workspace_path: null })))
+      .catch((e) =>
+        this.deps.hub.emit(run.id, "system.log", {
+          level: "warn",
+          msg: `couldn't remove the scout's workspace (${(e as Error).message}); Discard removes it`,
+        }),
+      );
   }
 
   /** Open questions for a repo (or all), most work held first, then oldest. */
@@ -1149,7 +1162,10 @@ ${this.workSnapshot(repo)}`;
           const confidence = ["high", "medium", "low"].includes(String(args.confidence)) ? (args.confidence as Ticket["confidence"]) : "low";
           // Duplicates, including tickets the operator rejected: matched at write time, any status.
           const key = Store.key(title);
-          const dup = this.deps.tickets.list({ repo: x.repo.name }).find((t) => !isRunnerTicket(t) && Store.key(t.title) === key);
+          // A done ticket's problem may be back, so done tickets don't block a new one.
+          const dup = this.deps.tickets
+            .list({ repo: x.repo.name })
+            .find((t) => !isRunnerTicket(t) && t.status !== "done" && Store.key(t.title) === key);
           if (dup) {
             const rejected = dup.status === "cancelled" && dup.source.startsWith("scout:");
             return { text: rejected ? `The operator rejected this before (ticket #${dup.id}); not filed again.` : `Already ticket #${dup.id} (${dup.status}); not filed again.` };
@@ -1255,7 +1271,7 @@ ${this.workSnapshot(repo)}`;
           const d = ownOpen(x, args.id);
           if (typeof d === "string") return { text: d, isError: true };
           this.deps.store.updateDecision(d.id, { status: "withdrawn", context: `${d.context}\n\nWithdrawn by the ${type} scout: ${clip(args.reason, 500)}`.trim() });
-          this.deps.tickets.moveHeld(d.id, null);
+          this.broadcastTickets(this.deps.tickets.moveHeld(d.id, null));
           changed(x, "scout.decision.withdrawn", { id: d.id });
           return { text: `Withdrew decision #${d.id}.` };
         },
@@ -1271,7 +1287,7 @@ ${this.workSnapshot(repo)}`;
           const keep = this.deps.store.getDecision(Number(args.into));
           if (!keep || keep.repo !== x.repo.name || keep.status !== "open" || keep.id === d.id) return { text: `into must be another open decision in this repo.`, isError: true };
           this.deps.store.updateDecision(d.id, { status: "superseded", superseded_by: keep.id });
-          this.deps.tickets.moveHeld(d.id, keep.id);
+          this.broadcastTickets(this.deps.tickets.moveHeld(d.id, keep.id));
           changed(x, "scout.decision.merged", { id: d.id, into: keep.id });
           return { text: `Merged decision #${d.id} into #${keep.id}.` };
         },
@@ -1285,9 +1301,10 @@ ${this.workSnapshot(repo)}`;
   /**
    * Answer an open question. The operator writes the decision text (it goes into every worker's
    * prompt). `version` must match the question as read, so a scout's edit can't slip in between.
-   * Held tickets in `keep` go to todo; the rest are dropped.
+   * Held tickets in `keep` go to todo, those in `drop` are cancelled, and any others (e.g. one
+   * filed after the operator looked) go to Proposed, so nothing is dropped unseen.
    */
-  decide(id: number, input: { decision: string; version: number; keep?: number[] }): Decision {
+  decide(id: number, input: { decision: string; version: number; keep?: number[]; drop?: number[] }): Decision {
     const d = this.deps.store.getDecision(id);
     if (!d) throw new RunError(`decision #${id} not found`, 404);
     if (d.status !== "open") throw new RunError(`decision #${id} is ${d.status}`, 409);
@@ -1298,8 +1315,11 @@ ${this.workSnapshot(repo)}`;
     if (!text) throw new RunError("write the decision: it's the text workers will follow");
     const out = this.deps.store.updateDecision(id, { status: "decided", decision: text, decided: true });
     const keep = new Set((input.keep ?? []).map(Number));
+    const drop = new Set((input.drop ?? []).map(Number));
     for (const t of this.deps.tickets.list({ repo: d.repo, status: "held" }).filter((t) => t.decision_id === id)) {
-      this.ticketDecided(t, keep.has(t.id) ? "todo" : "cancelled");
+      if (keep.has(t.id)) this.ticketDecided(t, "todo");
+      else if (drop.has(t.id)) this.ticketDecided(t, "cancelled");
+      else this.deps.hub.ticket(this.deps.tickets.setStatus(t.id, "proposed"));
     }
     this.refreshDecisionsLibrary(d.repo);
     return out;
@@ -1311,8 +1331,7 @@ ${this.workSnapshot(repo)}`;
     if (!d) throw new RunError(`decision #${id} not found`, 404);
     if (d.status !== "open") throw new RunError(`decision #${id} is ${d.status}`, 409);
     const out = this.deps.store.updateDecision(id, { status: "withdrawn" });
-    this.deps.tickets.moveHeld(id, null);
-    for (const t of this.deps.tickets.list({ repo: d.repo, status: "proposed" }).filter((t) => t.decision_id === id)) this.deps.hub.ticket(t);
+    this.broadcastTickets(this.deps.tickets.moveHeld(id, null));
     return out;
   }
 
@@ -1363,6 +1382,13 @@ ${this.workSnapshot(repo)}`;
     }
     this.deps.hub.ticket(out);
     return out;
+  }
+
+  private broadcastTickets(ids: number[]) {
+    for (const id of ids) {
+      const t = this.deps.tickets.get(id);
+      if (t) this.deps.hub.ticket(t);
+    }
   }
 
   private refreshDecisionsLibrary(repo: string) {

@@ -100,6 +100,7 @@ class ClaudeSdkSession implements AgentSession {
       model: spec.model,
       effort: spec.effort,
       resume: spec.resumeSessionId,
+      maxBudgetUsd: spec.maxBudgetUsd,
       permissionMode: "acceptEdits",
       allowedTools: spec.allow,
       // Workers report questions in their final message instead of blocking on a prompt.

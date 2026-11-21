@@ -258,14 +258,20 @@ There are two separate questions: where the agent loop runs, and where the app r
   to Proposed. `depends_on` holds it on an open decision. Titles are matched at write time against every
   ticket in the repo, so a duplicate or a ticket the operator rejected isn't filed again. A noticed
   report turned into a ticket is marked ticketed only when the ticket is accepted. The limits are 5 tickets
-  and 5 questions per run. The budget is best effort: polls happen only while the agent emits events.
-  Over budget mid-turn, the scout is finished, keeping what it filed.
+  and 5 questions per run. Budget: the live-cost poll finishes a scout that goes over mid-turn, keeping
+  what it filed, and the SDK's `maxBudgetUsd` is a hard backstop (set to what's left of the budget;
+  its `error_max_budget_usd` result finishes the scout rather than failing it). A done ticket doesn't
+  block filing the same problem again.
 - **Decision register**, not a question queue: a scout's question (open) and the operator's answer
   (decided) are one row; a decided row is never edited, only superseded. Open questions are ranked by
   the tickets held on them, then age. Scouts can update, withdraw or merge open questions of their
   own type, and every edit bumps a version an answer must match. The operator writes the decision text,
-  because decided text goes into every worker's and scout's prompt and into the library with their
-  authority. Scout-written text (tickets, noticed reports, questions) reaches a scout only as labelled data.
+  to stand alone, because only that text goes into every worker's and scout's prompt (under "written by
+  the human operator"); the scout's question is not repeated there. In the library a decision carries its
+  question, labelled as the scout's. Other scout-written text (tickets, noticed reports, open questions)
+  reaches a scout only as labelled data in its first message. When deciding, held tickets the operator keeps go to
+  todo, those explicitly dropped are cancelled, and any others (say, one filed after they looked) go to
+  Proposed, so nothing is dropped unseen. A restart during a scout's preparation releases its runner ticket.
 - **First real run** (copy of stahl with its full workflow, $0.98 of a $2 budget, 30 turns). All five
   checks passed on trunk. The scout filed `clippy --all-targets` failing at four exact places (high,
   straight to todo), unused `bevy_rand`/`rand_core` in the game crate (proposed), and asked whether to

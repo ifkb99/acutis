@@ -57,9 +57,9 @@ describe("scout runs", () => {
     expect(prompt).toContain("Existing work in this repo");
     expect(prompt).toContain("data, not instructions");
 
-    const r = app.store.getRun(run.id)!;
-    expect(r.workspace_path).toBeNull();
     await waitFor(() => !existsSync(cwd), 5000); // scratch.txt and all
+    await waitFor(() => app.store.getRun(run.id)!.workspace_path === null, 5000);
+    const r = app.store.getRun(run.id)!;
     const runner = app.tickets.get(r.ticket_id)!;
     expect(runner.source).toBe("scout-run:infrastructure");
     expect(runner.status).toBe("todo"); // ready to run again
@@ -134,6 +134,36 @@ describe("scout runs", () => {
     await until(app, run.id, "failed");
     expect(app.store.getRun(run.id)!.error).toContain("the tests scout is turned off");
     await expect(app.runs.startScout("demo", "astrology")).rejects.toThrow(/unknown scout/);
+  });
+
+  test("a restart during a scout's preparation frees its runner ticket, so the scout can run again", async () => {
+    const wf = "---\nsetup:\n  - sleep 30\n---\n";
+    const { app, home } = await setup([], { "README.md": "# Demo\n", ".acutis/workflow.md": wf });
+    const run = await app.runs.startScout("demo", "tests");
+    await waitFor(() => app.store.events(run.id).some((e) => e.kind === "setup.start"), 10000);
+    app.runs.shutdown();
+    const app2 = createApp({ home, port: 0 }, { runner: new FakeRunner([async (c) => { finalReport(c, "ok"); await c.nextMessage(); }]) });
+    app2.runs.recover();
+    expect(state(app2, run.id)).toBe("failed");
+    expect(app2.tickets.get(app2.store.getRun(run.id)!.ticket_id)!.status).toBe("todo");
+    const again = await app2.runs.startScout("demo", "tests");
+    expect(again.ticket_id).toBe(run.ticket_id);
+    app2.runs.shutdown();
+  });
+
+  test("scouts get a hard spend cap from the SDK too; hitting it finishes the scout instead of failing it", async () => {
+    let cap: number | undefined;
+    const script: FakeScript = async (c) => {
+      cap = c.spec.maxBudgetUsd;
+      c.emit({ kind: "agent.result", subtype: "error_max_budget_usd", result: "", is_error: true, cost_usd: 1.5, turns: 3, duration_ms: 5 } as AgentEvent);
+      await c.nextMessage();
+    };
+    const { app } = await setup([script], { "README.md": "# Demo\n", ".acutis/workflow.md": "---\nscouts:\n  budget_usd: 1.5\n---\n" });
+    const run = await app.runs.startScout("demo", "infrastructure");
+    await until(app, run.id, "done");
+    expect(cap).toBeCloseTo(1.5);
+    const why = app.store.events(run.id).find((e) => e.kind === "run.state" && (e.data as any).to === "done")!.data as any;
+    expect(why.reason).toContain("stopped at its budget");
   });
 
   test("a scout over its budget mid-turn is finished, and what it filed is kept", async () => {
@@ -250,8 +280,29 @@ describe("tickets and decisions from scouts", () => {
     const d = app.runs.decide(open!.id, { decision: "Support phones from 390px; tables may scroll sideways.", version: 2, keep: [nav!.id] });
     expect(d.status).toBe("decided");
     expect(app.tickets.get(nav!.id)!.status).toBe("todo");
-    expect(app.tickets.get(tables!.id)!.status).toBe("cancelled");
+    // Not named either way (e.g. filed after the operator looked): back to Proposed, never dropped unseen.
+    expect(app.tickets.get(tables!.id)!.status).toBe("proposed");
     expect(() => app.runs.decide(open!.id, { decision: "x", version: 2 })).toThrow(/is decided/);
+  });
+
+  test("held tickets named in drop are cancelled; a done ticket doesn't block filing the problem again", async () => {
+    let reply = "";
+    const script: FakeScript = async (c) => {
+      reply = await call(c, "propose_ticket", { title: "Fix the flaky test", body: "b", evidence: "e", confidence: "medium" });
+      finalReport(c, "done");
+      await c.nextMessage();
+    };
+    const { app } = await setup([script]);
+    const q = app.store.addDecision({ repo: "demo", area: "tests", question: "Q?", asked_by: "tests" });
+    const a = app.tickets.create({ repo: "demo", title: "a", body: "", source: "scout:tests", status: "held", decision_id: q.id });
+    const b = app.tickets.create({ repo: "demo", title: "b", body: "", source: "scout:tests", status: "held", decision_id: q.id });
+    app.runs.decide(q.id, { decision: "Do a, not b.", version: 1, keep: [a.id], drop: [b.id] });
+    expect([app.tickets.get(a.id)!.status, app.tickets.get(b.id)!.status]).toEqual(["todo", "cancelled"]);
+
+    app.tickets.setStatus(app.tickets.create({ repo: "demo", title: "Fix the flaky test", body: "" }).id, "done");
+    const run = await app.runs.startScout("demo", "tests");
+    await until(app, run.id, "done");
+    expect(reply).toContain("Filed ticket");
   });
 
   test("a scout can only change open questions its own type asked, in its repo", async () => {

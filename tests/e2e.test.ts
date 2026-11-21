@@ -136,6 +136,19 @@ describe("end to end", () => {
       expect(app.tickets.get(held.id)!.status).toBe("todo");
     }, 60000);
 
+    test.skipIf(!chrome)("Accept on a scout's proposed ticket moves it to Todo (headless Chrome)", async () => {
+      const t = app.tickets.create({ repo: "e2e", title: "Pin the toolchain", body: "why", source: "scout:infrastructure", status: "proposed", confidence: "medium" });
+      const r = await browser.check({
+        url: `${dash}/#token=${app.token}`,
+        steps: "waitfor .chip.conf-medium\nclick .card .btn.sm.primary\nwait 1000",
+        script: `[...document.querySelectorAll('.card')].some((c) => c.textContent.includes('Pin the toolchain') && c.textContent.includes('Start'))`,
+        width: 1300,
+        height: 900,
+      });
+      expect(r.failure).toBeUndefined();
+      expect(app.tickets.get(t.id)!.status).toBe("todo");
+    }, 60000);
+
     test.skipIf(!chrome)("without the token the dashboard asks for the link; pasting it into the open tab signs in (headless Chrome)", async () => {
       // Each check is a fresh Chrome profile, so nothing is in localStorage yet.
       const r = await browser.check({

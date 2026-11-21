@@ -40,13 +40,18 @@ export class LocalTicketSource implements TicketSource {
   }
 
   /** Move held tickets from one decision to another (merging duplicate questions), or to proposed. */
-  moveHeld(fromDecision: number, toDecision: number | null): void {
+  moveHeld(fromDecision: number, toDecision: number | null): number[] {
+    const ids = this.store.db
+      .query<{ id: number }, [number]>("SELECT id FROM tickets WHERE decision_id = ? AND status = 'held'")
+      .all(fromDecision)
+      .map((r) => r.id);
     this.store.db
       .query(
         `UPDATE tickets SET decision_id = $to, status = CASE WHEN $to IS NULL THEN 'proposed' ELSE status END,
            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE decision_id = $from AND status = 'held'`,
       )
       .run({ from: fromDecision, to: toDecision });
+    return ids;
   }
 
   claim(id: number): boolean {

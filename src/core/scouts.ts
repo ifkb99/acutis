@@ -64,7 +64,7 @@ export function decisionsSection(decisions: Decision[]): string {
   return `
 
 Operator decisions for this repo (written by the human operator; follow them):
-${decided.map((d) => `- #${d.id}${d.question ? ` (${d.question.slice(0, 120)})` : ""}: ${d.decision}`).join("\n")}`;
+${decided.map((d) => `- #${d.id}: ${d.decision}`).join("\n")}`;
 }
 
 export function scoutSystemPrompt(opts: {

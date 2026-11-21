@@ -107,7 +107,8 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
       "/api/decisions/:id/decide": {
         POST: api(async (req) => {
           const b = await body(req);
-          return runs.decide(Number(req.params.id), { decision: String(b.decision ?? ""), version: Number(b.version), keep: Array.isArray(b.keep) ? b.keep : [] });
+          const ids = (v: unknown) => (Array.isArray(v) ? v.map(Number) : []);
+          return runs.decide(Number(req.params.id), { decision: String(b.decision ?? ""), version: Number(b.version), keep: ids(b.keep), drop: ids(b.drop) });
         }),
       },
       "/api/decisions/:id/withdraw": { POST: api((req) => runs.withdrawDecision(Number(req.params.id))) },
