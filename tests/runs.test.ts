@@ -198,6 +198,26 @@ describe("run lifecycle", () => {
     expect(Date.now() - t0).toBeLessThan(5000);
   });
 
+  test("kill during verification doesn't wait on a cost poll, so the killed check is never reported", async () => {
+    const workflow = `---\ngates:\n  - sleep 30\n---\n`;
+    const slowCost: FakeScript = async (c) => {
+      c.setTotal(0.1);
+      c.holdTotal = new Promise(() => {}); // a poll would take the full 2s cap
+      writeFileSync(join(c.spec.cwd, "greeting.txt"), "hi\n");
+      c.result();
+      await c.nextMessage();
+    };
+    const { app, ticket } = await setup([slowCost], { ".acutis/workflow.md": workflow });
+    const run = await app.runs.start(ticket.id);
+    await waitFor(() => app.store.events(run.id).some((e) => e.kind === "gate.start"));
+    const t0 = Date.now();
+    await app.runs.kill(run.id);
+    expect(Date.now() - t0).toBeLessThan(500);
+    await Bun.sleep(300);
+    expect(state(app, run.id)).toBe("cancelled");
+    expect(app.store.events(run.id).some((e) => e.kind === "gate.result")).toBe(false);
+  });
+
   test("kill during preparation never launches an agent", async () => {
     const { app, ticket, runner } = await setup([writesGreeting]);
     const run = await app.runs.start(ticket.id);
@@ -401,6 +421,46 @@ describe("cost", () => {
     expect(cost(app2, run.id)).toBeCloseTo(0.3); // not 0.1 + 0.3, not 0.1 + 0.25 + 0.3
     const log = app2.store.events(run.id).find((e) => e.kind === "system.log" && String((e.data as any).msg).includes("interrupted turn"));
     expect((log?.data as any)?.msg).toContain("0.150");
+    app2.runs.shutdown();
+  });
+
+  test("a resumed total restored just under what was counted rebaselines instead of adding it again", async () => {
+    const dies: FakeScript = async (c) => {
+      c.setTotal(0.1);
+      c.emit({ kind: "agent.text", text: "working" });
+      await c.nextMessage();
+    };
+    const { app, ticket, home } = await costApp([dies]);
+    const run = await app.runs.start(ticket.id);
+    await waitFor(() => cost(app, run.id) > 0.09);
+    app.runs.shutdown();
+    const resumes: FakeScript = async (c) => {
+      c.setTotal(0.099); // the transcript saved slightly less than our last poll saw
+      await Bun.sleep(30);
+      c.result("success", 0.15);
+      await c.nextMessage();
+    };
+    const app2 = createApp({ home, port: 0 }, { runner: new FakeRunner([resumes]), costPollMs: 0 });
+    app2.runs.recover();
+    await app2.runs.resume(run.id);
+    await until(app2, run.id, "awaiting_review");
+    expect(cost(app2, run.id)).toBeCloseTo(0.151, 5); // 0.1 + (0.15 - 0.099): not 0.1 + 0.099 + …, and not 0.15 (ignoring the lower total)
+    app2.runs.shutdown();
+  });
+
+  test("runs queued under a limit still start after a restart with no limit", async () => {
+    const repoPath = await makeRepo();
+    const home = tempDir("acutis-home-");
+    const app = createApp({ home, port: 0, maxRuns: 1 }, { runner: new FakeRunner([async (c) => void (await c.nextMessage())]) });
+    app.store.addRepo({ name: "demo", path: repoPath, base: "main" });
+    const r1 = await app.runs.start(app.tickets.create({ repo: "demo", title: "one", body: "" }).id);
+    const r2 = await app.runs.start(app.tickets.create({ repo: "demo", title: "two", body: "" }).id);
+    await until(app, r1.id, "running");
+    expect(state(app, r2.id)).toBe("queued");
+    app.runs.shutdown();
+    const app2 = createApp({ home, port: 0, maxRuns: 0 }, { runner: new FakeRunner([writesGreeting]) });
+    app2.runs.recover();
+    await until(app2, r2.id, "awaiting_review");
     app2.runs.shutdown();
   });
 

@@ -367,8 +367,13 @@ The dashboard lists runs grouped by state. Each run shows:
   updating per turn. The last total seen is stored per run (`session_cost`), because a resumed session's
   restored total includes spend after our last look: a probe polled $0.00013, closed mid-turn, and
   resumed at $0.0119. Comparing with `session_cost` counts that tail once, and it is logged as
-  "spent in an earlier, interrupted turn". A poll reply that a turn result overtook is ignored.
-  Each turn's `turn_cost_usd` still covers the whole turn.
+  "spent in an earlier, interrupted turn". A poll reply that a turn result overtook is ignored, and
+  a resumed session's first total that comes back *below* what was counted rebaselines without adding.
+  Each turn's `turn_cost_usd` still covers the whole turn. A kill only waits for the poll while the
+  agent is mid-turn (`running`): in any other state, waiting would let a killed check be reported
+  as a failure. **Verified 2026-11-21 with the real runner:** cost rose live ($0.09 → $0.11) and a
+  killed run kept it. A daemon SIGTERM'd mid-turn at $0.098 resumed, recovered $0.007, and ended at
+  $0.143, equal to the session's own total.
 - **Sandbox off:** a PreToolUse hook sends any Bash command that names a user-writable path
   outside the workspace (`/tmp`, `$HOME`, `../…`) to the operator, even if the command is
   allowlisted (verified: a hook `ask` overrides an `allowedTools` match). It is a heuristic:

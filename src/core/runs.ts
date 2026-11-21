@@ -85,13 +85,14 @@ function tail(s: string, n: number): string {
 /**
  * Cost to add for one observed running total. `lastSeen` is the last total counted for this
  * session, carried over a resume (a resumed session continues from the total its transcript saved,
- * which includes spend after our last look, e.g. a turn cut off by a restart). A total below it
- * means the count restarted (a resume with no saved total, or /clear), unless it's a poll reply
- * that a turn result overtook; `first` marks the first total seen from the current agent process.
+ * which includes spend after our last look, e.g. a turn cut off by a restart). A result below it
+ * means the count restarted (a resume with no saved total, or /clear): all of it is new. A poll
+ * below it adds nothing: it's either a reply a newer result overtook, or a restarted count read
+ * before any new spend (the caller rebaselines on that).
  */
-export function costDelta(total: number, lastSeen: number | null, opts: { first: boolean; kind: "result" | "poll" }): number {
+export function costDelta(total: number, lastSeen: number | null, kind: "result" | "poll"): number {
   if (lastSeen === null || total >= lastSeen) return total - (lastSeen ?? 0);
-  return opts.first || opts.kind === "result" ? total : 0;
+  return kind === "result" ? total : 0;
 }
 
 const COST_POLL_TIMEOUT_MS = 2000;
@@ -206,7 +207,7 @@ export class RunManager {
 
   /** Deferred, so a state change never throws a queued run's start-up error into its caller. */
   private schedulePump() {
-    if (this.pumpScheduled || !this.deps.maxRuns) return;
+    if (this.pumpScheduled) return;
     this.pumpScheduled = true;
     queueMicrotask(() => {
       this.pumpScheduled = false;
@@ -216,8 +217,8 @@ export class RunManager {
 
   /** Start queued runs, oldest first, while slots are free. */
   private pump() {
-    const max = this.deps.maxRuns ?? 0;
-    if (!max) return;
+    // No limit (0) still starts runs queued under an earlier limit, e.g. before a restart.
+    const max = this.deps.maxRuns || Infinity;
     const runs = this.deps.store.listRuns(1000);
     let busy = runs.filter((r) => SLOT_STATES.includes(r.state)).length;
     for (const run of runs.filter((r) => r.state === "queued").sort((a, b) => a.id - b.id)) {
@@ -412,10 +413,16 @@ export class RunManager {
 
   /** Count an observed running total for the live session; returns what it added. */
   private applyCost(runId: number, a: Active, total: number, kind: "result" | "poll"): number {
-    const first = !a.costObserved;
-    // A poll answered after a newer result reports less than we've counted: ignore it.
-    if (kind === "poll" && !first && a.costSeen !== null && total < a.costSeen) return 0;
-    const delta = costDelta(total, a.costSeen, { first, kind });
+    if (kind === "poll" && a.costSeen !== null && total < a.costSeen) {
+      // Later in a process this is a reply a newer result overtook: ignore it. As the first look at
+      // a resumed process it means the count restarted (or was restored slightly lower): rebaseline.
+      if (a.costObserved) return 0;
+      a.costObserved = true;
+      a.costSeen = total;
+      this.deps.store.updateRun(runId, { session_cost: total });
+      return 0;
+    }
+    const delta = costDelta(total, a.costSeen, kind);
     a.costObserved = true;
     a.costSeen = total;
     a.turnCost += delta;
@@ -785,7 +792,9 @@ export class RunManager {
         a.intent = "kill";
         this.denyPending(a, "run killed");
         // A killed turn never reports a result, so read its spend before closing (capped wait).
-        await this.pollCost(runId, a, a.session, true);
+        // Only mid-turn: in any other state nothing is being spent, and waiting would give a
+        // killed gate time to be reported as a failure before the run is cancelled.
+        if (run.state === "running") await this.pollCost(runId, a, a.session, true);
         a.session?.close();
         a.session = null;
       }
