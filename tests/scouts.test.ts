@@ -78,7 +78,8 @@ describe("scout runs", () => {
     expect(existsSync(cwd)).toBe(true);
     await app.runs.kill(run.id);
     await waitFor(() => !existsSync(cwd), 5000);
-    expect(app.store.getRun(run.id)!.workspace_path).toBeNull();
+    // The path is cleared once removal has finished (so a failed removal can still be discarded).
+    await waitFor(() => app.store.getRun(run.id)!.workspace_path === null, 5000);
   });
 
   test("a scout resumed after a daemon restart keeps its scout prompt and tools, and never reaches review", async () => {
