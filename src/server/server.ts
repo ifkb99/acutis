@@ -13,6 +13,14 @@ function errorResponse(e: unknown): Response {
   return json({ error: e instanceof Error ? e.message : String(e) }, 500);
 }
 
+
+/** A ticket id, or null (absent, null or 0 clear the link). */
+function buildsOnArg(v: unknown): number | null {
+  if (v === undefined || v === null || v === 0) return null;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) throw new RunError("builds_on must be a ticket id or null", 400);
+  return v;
+}
+
 export function startServer(app: App, opts: { hostname?: string; development?: boolean } = {}) {
   const { runs, tickets, store, hub, cfg } = app;
   const hostname = opts.hostname ?? "127.0.0.1";
@@ -139,6 +147,7 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
             title: typeof b.title === "string" ? b.title : undefined,
             body: typeof b.body === "string" ? b.body : undefined,
             start: b.start === true,
+            builds_on: buildsOnArg(b.builds_on),
           });
         }),
       },
@@ -205,12 +214,17 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
           const b = await body(req);
           if (!b.repo || !store.getRepo(b.repo)) throw new RunError(`unknown repo "${b.repo}"`, 400);
           if (!b.title?.trim()) throw new RunError("title is required", 400);
-          const t = tickets.create({ repo: b.repo, title: b.title.trim(), body: (b.body ?? "").trim() });
+          const buildsOn = buildsOnArg(b.builds_on);
+          if (buildsOn !== null) runs.validateBuildsOn(b.repo, buildsOn);
+          const t = tickets.create({ repo: b.repo, title: b.title.trim(), body: (b.body ?? "").trim(), builds_on: buildsOn });
           hub.ticket(t);
           return t;
         }),
       },
       "/api/tickets/:id/start": { POST: api((req) => runs.start(Number(req.params.id))) },
+      "/api/tickets/:id/builds-on": {
+        POST: api(async (req) => runs.setBuildsOn(Number(req.params.id), buildsOnArg((await body(req)).builds_on))),
+      },
       "/api/tickets/:id/cancel": {
         POST: api((req) => {
           const t = tickets.get(Number(req.params.id));

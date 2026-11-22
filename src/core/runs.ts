@@ -101,6 +101,10 @@ interface Active {
   ticket: Ticket;
   workflow: Workflow;
   ws: Workspace;
+  /** Trunk when the run started (or was last rebased): policy and contract changes are judged from it. */
+  trunkCommit: string;
+  /** The ticket whose landed work, not yet on trunk, the workspace started on; null when it started on trunk. */
+  stackedOn: Ticket | null;
   session: AgentSession | null;
   /** Set right before we interrupt or close, so the resulting agent events aren't treated as failures. */
   intent: "pause" | "redirect" | "kill" | "close" | null;
@@ -359,6 +363,7 @@ export class RunManager {
     }
     const repo = store.getRepo(ticket.repo);
     if (!repo) throw new RunError(`repo "${ticket.repo}" is not registered`, 404);
+    this.checkBuildsOnLanded(ticket);
     if (!tickets.claim(ticketId)) throw new RunError(`ticket #${ticketId} is not in "todo"`, 409);
     hub.ticket(tickets.get(ticketId)!);
 
@@ -384,6 +389,99 @@ export class RunManager {
     });
     if (!queued) this.prepare(run, repo, ticket).catch((e) => this.fail(run.id, e));
     return run;
+  }
+
+  // ------------------------------------------------------------------ building on another ticket
+
+  /** A ticket that builds on another can only start once that one has landed. */
+  private checkBuildsOnLanded(ticket: Pick<Ticket, "id" | "repo" | "builds_on">) {
+    if (!ticket.builds_on) return;
+    const what = ticket.id ? `ticket #${ticket.id}` : "this ticket";
+    const parent = this.deps.tickets.get(ticket.builds_on);
+    if (!parent) throw new RunError(`${what} builds on #${ticket.builds_on}, which no longer exists; clear the link first`, 409);
+    const clear = ticket.id ? ` (acutis ticket builds-on ${ticket.id} none)` : "";
+    if (parent.status === "done") {
+      // Done without a landed work run (closed by hand, say): there's nothing to start on.
+      if (!this.landedRunOf(parent.id)) {
+        throw new RunError(`${what} builds on #${parent.id}, which is done but has no landed run to start on. Clear the link${clear} to start from trunk.`, 409);
+      }
+      return;
+    }
+    if (parent.status === "cancelled") {
+      throw new RunError(`${what} builds on #${parent.id}, which was cancelled. Clear the link${clear} to start it from ${this.deps.store.getRepo(ticket.repo)?.base ?? "trunk"}.`, 409);
+    }
+    throw new RunError(`${what} builds on #${parent.id}, which hasn't landed yet (it is ${parent.status}). Start it once #${parent.id} lands, or clear the link${clear}.`, 409);
+  }
+
+  /**
+   * Where a work run's workspace starts: trunk, or, for a ticket that builds on another whose
+   * landed work isn't on trunk yet (land: bookmark or push, not merged), on that landed work.
+   * Squash or rebase merges give the work new commits, so it's taken as not on trunk; merge with a
+   * merge commit (or clear the link) to start such tickets from trunk again.
+   */
+  private async startPoint(repo: Repo, ticket: Ticket, trunk: string): Promise<{ commit: string; stackedOn: Ticket | null; msg: string | null }> {
+    if (!ticket.builds_on) return { commit: trunk, stackedOn: null, msg: null };
+    const parent = this.deps.tickets.get(ticket.builds_on);
+    if (!parent || parent.status !== "done") this.checkBuildsOnLanded(ticket);
+    const landedRun = this.landedRunOf(parent!.id);
+    if (!landedRun) throw new RunError(`ticket #${ticket.id} builds on #${parent!.id}, but #${parent!.id} has no landed run; clear the link to start from ${repo.base}`, 409);
+    let commit = landedRun.landed_commit;
+    if (!commit && landedRun.bookmark) {
+      // Runs from before landed_commit was recorded: the bookmark, if it's still there.
+      commit = await this.deps.workspaces.resolve(repo, landedRun.bookmark).catch(() => null);
+    }
+    if (!commit) {
+      throw new RunError(
+        `ticket #${ticket.id} builds on #${parent!.id}, but #${parent!.id}'s landed work can't be found (bookmark ${landedRun.bookmark ?? "(none)"} is gone). Merge it into ${repo.base} and clear the link, or re-land #${parent!.id}.`,
+        409,
+      );
+    }
+    if (await this.deps.workspaces.isAncestor(repo, commit, trunk)) {
+      return { commit: trunk, stackedOn: null, msg: `Builds on #${parent!.id}, which is on ${repo.base}: starting from ${repo.base}` };
+    }
+    return {
+      commit,
+      stackedOn: parent!,
+      msg: `Builds on #${parent!.id} (${parent!.title}), landed as ${landedRun.bookmark ?? "a bookmark"} but not on ${repo.base} yet: starting on top of it (${commit.slice(0, 12)}). The review diff shows only this ticket's changes; policy and checks still come from ${repo.base}.`,
+    };
+  }
+
+  private landedRunOf(ticketId: number): Run | undefined {
+    return this.deps.store
+      .runsForTicket(ticketId)
+      .filter((r) => r.kind === "work" && r.state === "done")
+      .at(-1);
+  }
+
+  /** Set or clear the ticket `id` builds on: same repo, an ordinary ticket, not yet started, no cycles. */
+  setBuildsOn(id: number, buildsOn: number | null): Ticket {
+    const { tickets, hub } = this.deps;
+    const ticket = tickets.get(id);
+    if (!ticket) throw new RunError(`ticket #${id} not found`, 404);
+    if (isRunnerTicket(ticket)) throw new RunError(`ticket #${id} is a runner's own ticket`, 409);
+    if (!["todo", "proposed", "held"].includes(ticket.status)) {
+      throw new RunError(`ticket #${id} is ${ticket.status}; only a ticket that hasn't started can change what it builds on`, 409);
+    }
+    if (buildsOn !== null) this.validateBuildsOn(ticket.repo, buildsOn, id);
+    const t = tickets.setBuildsOn(id, buildsOn);
+    hub.ticket(t);
+    return t;
+  }
+
+  /** Throws unless `parentId` is an ordinary ticket in `repo` that `childId` (if it exists yet) may build on. */
+  validateBuildsOn(repo: string, parentId: number, childId?: number) {
+    const parent = this.deps.tickets.get(parentId);
+    if (!parent) throw new RunError(`ticket #${parentId} not found`, 404);
+    if (parent.repo !== repo) throw new RunError(`ticket #${parentId} is in repo "${parent.repo}", not "${repo}"`, 409);
+    if (isRunnerTicket(parent)) throw new RunError(`ticket #${parentId} is a runner's own ticket`, 409);
+    if (childId === undefined) return;
+    // Walk up from the parent: reaching the child would make a cycle.
+    const seen = new Set<number>();
+    for (let t: Ticket | null = parent; t; t = t.builds_on ? this.deps.tickets.get(t.builds_on) : null) {
+      if (t.id === childId) throw new RunError(`ticket #${childId} can't build on #${parentId}: #${parentId} already builds on #${childId}`, 409);
+      if (seen.has(t.id)) break;
+      seen.add(t.id);
+    }
   }
 
   /** Runs holding a slot right now (from the store, so runs still preparing count too). */
@@ -431,19 +529,24 @@ export class RunManager {
 
   private async prepare(run: Run, repo: Repo, ticket: Ticket) {
     const { workspaces, hub, store } = this.deps;
-    const base = await workspaces.resolve(repo, repo.base);
-    // Policy always comes from trunk, never from the workspace the agent can edit.
-    const workflow = await this.loadWorkflow(repo, base);
+    const trunk = await workspaces.resolve(repo, repo.base);
+    // Policy always comes from trunk, never from the workspace the agent can edit (nor from the
+    // landed-but-unmerged work a stacked run starts on).
+    const workflow = await this.loadWorkflow(repo, trunk);
     hub.emit(run.id, "system.log", {
-      msg: `Workflow from ${workflow.source}; base ${repo.base} = ${base.slice(0, 12)}`,
+      msg: `Workflow from ${workflow.source}; base ${repo.base} = ${trunk.slice(0, 12)}`,
       gates: workflow.gates.map(describeGate),
     });
+    const start = run.kind === "work" ? await this.startPoint(repo, ticket, trunk) : { commit: trunk, stackedOn: null, msg: null };
+    if (start.msg) hub.emit(run.id, "system.log", { msg: start.msg });
+    const base = start.commit;
     const ws = await workspaces.create(repo, `acutis-t${ticket.id}-r${run.id}`, base);
     hub.run(
       store.updateRun(run.id, {
         workspace_name: ws.name,
         workspace_path: ws.path,
         base_commit: base,
+        trunk_commit: trunk,
         model: workflow.model ?? null,
       }),
     );
@@ -454,6 +557,8 @@ export class RunManager {
       ticket,
       workflow,
       ws,
+      trunkCommit: trunk,
+      stackedOn: start.stackedOn,
       session: null,
       intent: null,
       permissions: new Map(),
@@ -480,8 +585,9 @@ export class RunManager {
     };
     this.active.set(run.id, a);
 
-    // Before setup steps: they write files (node_modules, build docs) that aren't trunk.
-    await this.indexLibrary(run.id, repo, ws, workflow);
+    // Before setup steps: they write files (node_modules, build docs) that aren't trunk. A stacked
+    // run's workspace isn't trunk either: it searches trunk's index (or the latest) instead.
+    if (base === trunk) await this.indexLibrary(run.id, repo, ws, workflow);
     if (this.mustGet(run.id).state !== "preparing") return;
 
     const alive = () => this.mustGet(run.id).state === "preparing";
@@ -668,8 +774,8 @@ export class RunManager {
         // Keep the commits live runs still search; drop the rest.
         const live = this.deps.store
           .listRuns(1000)
-          .filter((x) => x.repo === repo.name && !TERMINAL_STATES.includes(x.state) && x.base_commit)
-          .map((x) => x.base_commit!);
+          .filter((x) => x.repo === repo.name && !TERMINAL_STATES.includes(x.state) && (x.trunk_commit ?? x.base_commit))
+          .map((x) => (x.trunk_commit ?? x.base_commit)!);
         this.library.prune(repo.name, [...live, ws.baseCommit]);
         this.deps.hub.emit(runId, "system.log", {
           msg: `Project library: ${r.files} docs (${r.chunks} sections) indexed at ${ws.baseCommit.slice(0, 12)}`,
@@ -757,12 +863,17 @@ export class RunManager {
     if (!repo || !ticket || !run.workspace_path || !run.workspace_name || !run.base_commit) {
       throw new RunError(`run ${runId} has no workspace to continue in`, 409);
     }
-    const workflow = await this.loadWorkflow(repo, run.base_commit);
+    // Older runs have no trunk_commit: they always started on trunk.
+    const trunkCommit = run.trunk_commit ?? run.base_commit;
+    const workflow = await this.loadWorkflow(repo, trunkCommit);
+    const stackedOn = trunkCommit !== run.base_commit && ticket.builds_on ? this.deps.tickets.get(ticket.builds_on) : null;
     const a: Active = {
       repo,
       ticket,
       workflow,
       ws: { name: run.workspace_name, path: run.workspace_path, baseCommit: run.base_commit },
+      trunkCommit,
+      stackedOn,
       session: null,
       intent: null,
       permissions: new Map(),
@@ -846,6 +957,7 @@ export class RunManager {
           decisions,
           lessons,
           librarian: Boolean(a.workflow.library && a.workflow.library.librarian && this.deps.oneShot),
+          stackedOn: a.stackedOn ? { id: a.stackedOn.id, title: a.stackedOn.title, trunk: a.repo.base } : undefined,
         });
     const session = this.deps.runner.start({
       cwd: a.ws.path,
@@ -1634,7 +1746,8 @@ export class RunManager {
   }
 
   private libraryTools(runId: number, a: () => Active, by: "worker" | "librarian" = "worker"): AcutisTool[] {
-    const docsCommit = (x: Active) => (this.library.isIndexed(x.repo.name, x.ws.baseCommit) ? x.ws.baseCommit : this.library.latestCommit(x.repo.name));
+    // Docs as of trunk at the run's start (a stacked run's own base isn't indexed).
+    const docsCommit = (x: Active) => (this.library.isIndexed(x.repo.name, x.trunkCommit) ? x.trunkCommit : this.library.latestCommit(x.repo.name));
     const tools: AcutisTool[] = [
       {
         name: "search_project",
@@ -1651,7 +1764,7 @@ export class RunManager {
           const query = clip(args.query, 300);
           if (!query) return { text: "query is empty", isError: true };
           this.refreshRunSummaries(x.repo.name);
-          let commit: string | null = x.ws.baseCommit;
+          let commit: string | null = x.trunkCommit;
           let note = "";
           if (!this.library.isIndexed(x.repo.name, commit)) {
             commit = this.library.latestCommit(x.repo.name);
@@ -1727,7 +1840,7 @@ export class RunManager {
           const commit = docsCommit(x);
           if (!commit) return { text: "No docs are indexed for this repo." };
           const body = this.library.overview(x.repo.name, commit, clip(args.path_prefix, 200));
-          const text = `Docs as of ${commit.slice(0, 12)}${commit !== x.ws.baseCommit ? " (not your base; may differ)" : ""}. "about:" lines are model-written descriptions; check the text.\n\n${body || "(no doc files)"}`;
+          const text = `Docs as of ${commit.slice(0, 12)}${commit !== x.trunkCommit ? " (not your base; may differ)" : ""}. "about:" lines are model-written descriptions; check the text.\n\n${body || "(no doc files)"}`;
           this.deps.hub.emit(runId, "library.overview", { prefix: clip(args.path_prefix, 200), chars: text.length, by });
           return { text };
         },
@@ -1766,7 +1879,7 @@ export class RunManager {
         const seen = new Set<string>();
         const tools = this.libraryTools(runId, a, "librarian").map((t) => ({
           ...t,
-          handler: async (args2: Record<string, string | number | undefined>) => {
+          handler: async (args2: Record<string, string | number | boolean | undefined>) => {
             const out = await t.handler(args2);
             for (const m of out.text.matchAll(/^\[L\d+\] (.+?)(?::(\d+))? \[(?:approved|reviewed)/gm)) {
               const line = Number(m[2] ?? 0);
@@ -1909,7 +2022,21 @@ export class RunManager {
       params: {
         title: { type: "string", description: "One line naming the work, e.g. \"engine: export getLegalMovesFor(tile)\"." },
         need: { type: "string", description: "What is needed, concretely, and where (files, packages, interfaces)." },
-        why: { type: "string", description: "What your ticket can't do without it, and what you did meanwhile (a stub, a skipped case)." },
+        why: { type: "string", description: "What your ticket can't do without it, and what you did meanwhile (a stub, a skipped case). For a follow-up: why it should come next." },
+        follow_up: {
+          type: "boolean",
+          description:
+            "true for follow-up work that comes after your ticket and needs its changes (the next step of a plan, a part you were told to split off). " +
+            "The new ticket builds on yours: it starts on top of your work once yours lands, and your ticket doesn't wait on it.",
+          optional: true,
+        },
+        after: {
+          type: "number",
+          description:
+            "With follow_up: the id of an earlier follow-up you filed in this run that this one comes after (e.g. step 3 after step 2). " +
+            "It then builds on that ticket instead of yours. Only tickets this run filed as follow-ups are accepted.",
+          optional: true,
+        },
       },
       handler: async (args): Promise<ToolOutput> => {
         const x = a();
@@ -1932,12 +2059,28 @@ export class RunManager {
         if (x.workRequests >= MAX_WORK_REQUESTS_PER_RUN) {
           return { text: `This run already made ${MAX_WORK_REQUESTS_PER_RUN} work requests; list anything else in your final summary.`, isError: true };
         }
+        // Models sometimes send "true" as a string.
+        const followUp = args.follow_up === true || args.follow_up === "true";
+        let parent = x.ticket.id;
+        if (followUp && args.after !== undefined && args.after !== null && args.after !== "") {
+          const after = Number(String(args.after).replace(/^#/, ""));
+          // Only a follow-up this run filed itself: a worker can't point tickets at arbitrary work.
+          const mine = this.deps.store
+            .events(runId)
+            .some((e) => e.kind === "work.request" && (e.data as any).follow_up === true && (e.data as any).ticket === after);
+          if (!mine) {
+            return { text: `after must be the id of a follow-up you filed in this run (got ${args.after}); leave it out to build on your own ticket.`, isError: true };
+          }
+          parent = after;
+        }
         x.workRequests++;
         const t = this.deps.tickets.create({
           repo: x.repo.name,
           title,
           body: [
-            `Requested by the worker of run ${runId}: ticket #${x.ticket.id} (${x.ticket.title}) waits on it. Worker-written: check it before acting.`,
+            followUp
+              ? `Follow-up requested by the worker of run ${runId}: it builds on ticket #${parent}${parent === x.ticket.id ? ` (${x.ticket.title})` : ""} and starts on top of that work once it lands. Worker-written: check it before acting.`
+              : `Requested by the worker of run ${runId}: ticket #${x.ticket.id} (${x.ticket.title}) waits on it. Worker-written: check it before acting.`,
             "",
             need,
             "",
@@ -1945,11 +2088,15 @@ export class RunManager {
           ].join("\n"),
           source: "work-request",
           status: "proposed",
+          // Only ever the requester's own ticket: a worker can't point tickets at arbitrary work.
+          builds_on: followUp ? parent : null,
         });
         this.deps.hub.ticket(t);
-        this.deps.hub.emit(runId, "work.request", { ticket: t.id, title, status: t.status });
+        this.deps.hub.emit(runId, "work.request", { ticket: t.id, title, status: t.status, ...(followUp ? { follow_up: true } : {}) });
         return {
-          text: `Filed as proposed ticket #${t.id} for the operator. Don't do that work here: carry on with your ticket, and say in your final summary what is unfinished until #${t.id} lands.`,
+          text: followUp
+            ? `Filed as proposed follow-up ticket #${t.id}, building on #${parent}: it starts on top of that work once it lands, so don't do it here; mention it in your final summary. A later step that needs this one can pass after: ${t.id}.`
+            : `Filed as proposed ticket #${t.id} for the operator. Don't do that work here: carry on with your ticket, and say in your final summary what is unfinished until #${t.id} lands.`,
         };
       },
     };
@@ -2201,7 +2348,7 @@ export class RunManager {
    * workspace; optionally start a worker on the new ticket. Once only: the check and the save
    * happen with no await between them.
    */
-  async saveDraft(runId: number, input: { title?: string; body?: string; start?: boolean }): Promise<{ ticket: Ticket; run?: Run }> {
+  async saveDraft(runId: number, input: { title?: string; body?: string; start?: boolean; builds_on?: number | null }): Promise<{ ticket: Ticket; run?: Run }> {
     const run = this.mustWriter(runId);
     if (run.state === "queued" || run.state === "preparing" || run.state === "running") {
       throw new RunError(`wait for the writer to finish its turn, or stop it first (it is ${run.state})`, 409);
@@ -2212,7 +2359,13 @@ export class RunManager {
     const title = clip((input.title ?? view.draft?.title ?? "").replace(/\s+/g, " "), 200);
     const body = clip(input.body ?? view.draft?.body ?? "", MAX_DRAFT_BODY);
     if (!title) throw new RunError("the ticket needs a title");
-    const ticket = this.deps.tickets.create({ repo: run.repo, title, body, source: WRITER_SOURCE });
+    const buildsOn = input.builds_on ?? null;
+    if (buildsOn !== null) {
+      this.validateBuildsOn(run.repo, buildsOn);
+      // Refuse before saving, so "save & start" doesn't leave a saved ticket and an error.
+      if (input.start) this.checkBuildsOnLanded({ id: 0, repo: run.repo, builds_on: buildsOn });
+    }
+    const ticket = this.deps.tickets.create({ repo: run.repo, title, body, source: WRITER_SOURCE, builds_on: buildsOn });
     this.deps.hub.ticket(ticket);
     this.deps.hub.emit(runId, "writer.saved", { ticket_id: ticket.id, edited: Boolean(view.draft && (title !== view.draft.title || body !== view.draft.body)) });
     const a = this.active.get(runId);
@@ -2960,7 +3113,7 @@ ${this.workSnapshot(repo)}${gapList}`;
       }
       if (a.workflow.land !== "trunk" && touch.depends.length) {
         const trunk = await this.deps.workspaces.resolve(a.repo, a.repo.base);
-        const stale = await this.staleContracts(a.repo, a.workflow, touch.depends, a.ws.baseCommit, trunk);
+        const stale = await this.staleContracts(a.repo, a.workflow, touch.depends, a.trunkCommit, trunk);
         if (stale.length) {
           this.deps.hub.emit(runId, "contract.stale", {
             contracts: stale,
@@ -2998,6 +3151,7 @@ ${this.workSnapshot(repo)}${gapList}`;
       throw new RunError(`landing stopped: ${reason}`, status);
     };
     let bookmark: string;
+    let landed: string;
     try {
       if (a.workflow.land === "trunk") {
         if (!(await workspaces.isBookmark(a.repo, a.repo.base))) {
@@ -3008,7 +3162,13 @@ ${this.workSnapshot(repo)}${gapList}`;
         // Contracts this run depends on that changed on trunk since it started, judged by the
         // contract list on the new trunk (that's the policy it lands under). Before the rebase
         // moves the base.
-        const oldBase = a.ws.baseCommit;
+        // A stacked run's own change is all `rebase -r @` moves: landing it on a trunk without the
+        // work it started on would drop that work.
+        if (a.ws.baseCommit !== a.trunkCommit && !(await workspaces.isAncestor(a.repo, a.ws.baseCommit, trunk))) {
+          const on = a.stackedOn ? `#${a.stackedOn.id}'s landed work` : `commit ${a.ws.baseCommit.slice(0, 12)}`;
+          return back(`this run started on ${on}, which isn't on ${a.repo.base} yet. Land that on ${a.repo.base} first, then approve again.`);
+        }
+        const oldBase = a.trunkCommit;
         const trunkWf = await this.loadWorkflow(a.repo, trunk);
         const touch = this.contractTouch(trunkWf, await workspaces.changedFiles(a.repo, a.ws));
         changedContracts = touch.changes;
@@ -3025,7 +3185,9 @@ ${this.workSnapshot(repo)}${gapList}`;
           // The change now sits on the new trunk: diffs, changed-file checks and policy loading
           // must be relative to it, or other tickets' work shows up as this run's.
           a.ws = { ...a.ws, baseCommit: trunk };
-          hub.run(store.updateRun(runId, { base_commit: trunk }));
+          a.trunkCommit = trunk;
+          a.stackedOn = null;
+          hub.run(store.updateRun(runId, { base_commit: trunk, trunk_commit: trunk }));
           // Re-check under the policy on the new trunk, which is where policy always comes from.
           a.workflow = await this.loadWorkflow(a.repo, trunk);
         }
@@ -3057,13 +3219,14 @@ ${this.workSnapshot(repo)}${gapList}`;
         bookmark = `acutis/${a.ticket.id}-${slug(a.ticket.title)}`;
         await workspaces.land(a.repo, a.ws, { message, bookmark, push: a.workflow.land === "push" });
       }
+      landed = await workspaces.resolve(a.repo, bookmark);
       this.previews.stop(runId);
       await workspaces.destroy(a.repo, a.ws, { abandon: false });
     } catch (e) {
       if (e instanceof RunError) throw e;
       return back((e as Error).message, 500);
     }
-    hub.run(store.updateRun(runId, { bookmark, workspace_path: null }));
+    hub.run(store.updateRun(runId, { bookmark, landed_commit: landed, workspace_path: null }));
     this.active.delete(runId);
     this.setState(runId, "done", a.workflow.land === "trunk" ? `landed on ${bookmark}` : `landed as bookmark ${bookmark}`);
     hub.ticket(this.deps.tickets.setStatus(a.ticket.id, "done"));

@@ -188,6 +188,13 @@ export class JjWorkspaceProvider implements WorkspaceProvider {
     return out.split("\n").includes(name);
   }
 
+  async isAncestor(repo: Repo, ancestor: string, descendant: string): Promise<boolean> {
+    const out = await jj(repo.path, [
+      "log", "--ignore-working-copy", "--no-graph", "-r", `(${ancestor}) & ::(${descendant})`, "-T", 'commit_id ++ "\\n"',
+    ]);
+    return out.split("\n").some(Boolean);
+  }
+
   async destroy(repo: Repo, ws: Workspace, opts: { abandon: boolean }) {
     if (opts.abandon) {
       await jj(repo.path, ["abandon", `${ws.name}@`]).catch(() => {});

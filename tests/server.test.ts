@@ -109,3 +109,22 @@ test("repo notes can be read and set", async () => {
   expect(((await (await fetch(`${base}/api/repos/srv`, { headers: auth })).json()) as any).notes).toBe("Use Edit.");
   expect((await fetch(`${base}/api/repos/srv/notes`, { method: "PUT", headers: { "content-type": "application/json", ...auth }, body: "{}" })).status).toBe(403);
 });
+
+test("tickets can be created building on another, and the link set or cleared", async () => {
+  const { makeRepo } = await import("./helpers");
+  app.store.addRepo({ name: "stack", path: await makeRepo(), base: "main" });
+  const h = { ...auth, "x-acutis": "1", "content-type": "application/json" };
+  const post = (path: string, b: unknown) => fetch(`${base}${path}`, { method: "POST", headers: h, body: JSON.stringify(b) });
+  const a = await (await post("/api/tickets", { repo: "stack", title: "A" })).json();
+  const b = await (await post("/api/tickets", { repo: "stack", title: "B", builds_on: a.id })).json();
+  expect(b.builds_on).toBe(a.id);
+  expect((await post("/api/tickets", { repo: "stack", title: "C", builds_on: "x" })).status).toBe(400);
+  expect((await post("/api/tickets", { repo: "stack", title: "C", builds_on: 99999 })).status).toBe(404);
+  // Starting B before A lands is refused, and B isn't claimed.
+  const start = await post(`/api/tickets/${b.id}/start`, {});
+  expect(start.status).toBe(409);
+  expect((await start.json()).error).toContain(`builds on #${a.id}, which hasn't landed yet`);
+  expect((await (await post(`/api/tickets/${a.id}/builds-on`, { builds_on: b.id })).json()).error).toContain("already builds on");
+  const cleared = await (await post(`/api/tickets/${b.id}/builds-on`, { builds_on: null })).json();
+  expect(cleared.builds_on).toBeNull();
+});
