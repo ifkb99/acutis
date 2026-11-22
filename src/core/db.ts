@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Decision, Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
+import type { Decision, LibraryGap, Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS repos (
@@ -80,6 +80,19 @@ CREATE TABLE IF NOT EXISTS decisions (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   decided_at TEXT
+);
+CREATE TABLE IF NOT EXISTS library_gaps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  question TEXT NOT NULL,
+  question_key TEXT NOT NULL,
+  tried TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',
+  count INTEGER NOT NULL DEFAULT 1,
+  run_ids TEXT NOT NULL DEFAULT '',
+  ticket_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS runs_ticket ON runs(ticket_id);
@@ -198,6 +211,44 @@ export class Store {
       .query("UPDATE noticed SET status = ?, ticket_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
       .run(patch.status, patch.ticket_id ?? null, id);
     return this.getNoticed(id)!;
+  }
+
+  // ---- library gaps
+  /** Add a gap, or count it against the latest one with the same question (any status), unless `resolved` says that one is settled. */
+  addGap(g: { repo: string; runId: number; question: string; tried: string }, resolved: (existing: LibraryGap) => boolean): { gap: LibraryGap; merged: boolean } {
+    const key = Store.key(g.question);
+    const prev = this.db
+      .query<LibraryGap, [string, string]>("SELECT * FROM library_gaps WHERE repo = ? AND question_key = ? ORDER BY id DESC LIMIT 1")
+      .get(g.repo, key);
+    if (prev && !resolved(prev)) {
+      const runs = new Set(prev.run_ids.split(",").filter(Boolean));
+      runs.add(String(g.runId));
+      this.db
+        .query("UPDATE library_gaps SET count = count + 1, run_ids = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
+        .run([...runs].join(","), prev.id);
+      return { gap: this.getGap(prev.id)!, merged: true };
+    }
+    const row = this.db
+      .query<{ id: number }, any>("INSERT INTO library_gaps (repo, question, question_key, tried, run_ids) VALUES ($repo, $q, $key, $tried, $runs) RETURNING id")
+      .get({ repo: g.repo, q: g.question, key, tried: g.tried, runs: String(g.runId) })!;
+    return { gap: this.getGap(row.id)!, merged: false };
+  }
+  getGap(id: number): LibraryGap | null {
+    return this.db.query<LibraryGap, [number]>("SELECT * FROM library_gaps WHERE id = ?").get(id);
+  }
+  listGaps(filter: { repo?: string; status?: LibraryGap["status"] } = {}): LibraryGap[] {
+    return this.db
+      .query<LibraryGap, any>(
+        "SELECT * FROM library_gaps WHERE ($repo IS NULL OR repo = $repo) AND ($status IS NULL OR status = $status) ORDER BY count DESC, id DESC LIMIT 500",
+      )
+      .all({ repo: filter.repo ?? null, status: filter.status ?? null });
+  }
+  updateGap(id: number, patch: { status?: LibraryGap["status"]; ticket_id?: number | null }): LibraryGap {
+    const cur = this.getGap(id)!;
+    this.db
+      .query("UPDATE library_gaps SET status = ?, ticket_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
+      .run(patch.status ?? cur.status, patch.ticket_id === undefined ? cur.ticket_id : patch.ticket_id, id);
+    return this.getGap(id)!;
   }
 
   // ---- decisions

@@ -157,6 +157,8 @@ export type AgentEvent =
       turns: number;
       duration_ms: number;
       errors?: string[];
+      /** Per-model running token totals for the session (main loop and subagents), when the runner reports them. */
+      model_usage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number }>;
     }
   | { kind: "agent.exit"; error?: string };
 
@@ -224,6 +226,22 @@ export interface AgentSession {
 export interface AgentRunner {
   readonly name: string;
   start(spec: AgentSpec): AgentSession;
+}
+
+/**
+ * A short, synchronous call to a cheap model for Acutis's own work (describing docs, the
+ * librarian). The session has no built-in tools, no settings or MCP servers of its own, runs in
+ * an empty directory, and gets only the Acutis tools passed here: it reads untrusted repo text.
+ */
+export interface OneShotModel {
+  ask(opts: {
+    system: string;
+    prompt: string;
+    tools?: AcutisTool[];
+    maxTurns: number;
+    maxBudgetUsd: number;
+    model?: string;
+  }): Promise<{ text: string; costUsd: number; error?: string }>;
 }
 
 // ---- Browser ---------------------------------------------------------------
@@ -319,7 +337,18 @@ export interface Workflow {
   /** Where the workflow came from, for display. */
   source: string;
   /** Which tracked files the project library indexes; false turns the library off for the repo. */
-  library: { include: string[]; exclude: string[] } | false;
+  library:
+    | {
+        include: string[];
+        exclude: string[];
+        /** Have a cheap model write descriptions of doc sections for search (off until the A/B says otherwise). */
+        describe: boolean;
+        /** Spend cap for describing one commit's docs, in USD. */
+        describe_budget_usd: number;
+        /** Offer workers and scouts ask_librarian (a cheap model that answers from the docs, with citations). */
+        librarian: boolean;
+      }
+    | false;
   /** Scouts the repo allows, with a focus and budget each; false turns scouts off. */
   scouts:
     | {
@@ -357,6 +386,22 @@ export interface Decision {
   created_at: string;
   updated_at: string;
   decided_at: string | null;
+}
+
+/** A question a worker searched the project's docs for and couldn't answer. */
+export interface LibraryGap {
+  id: number;
+  repo: string;
+  question: string;
+  /** What the reporter searched or read before giving up. */
+  tried: string;
+  status: "open" | "ticketed" | "dismissed";
+  count: number;
+  run_ids: string;
+  /** The ticket meant to close it: pending while that ticket is proposed, ticketed once accepted. */
+  ticket_id: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export type NoticedKind = "bug" | "failing-check" | "tech-debt" | "docs" | "security" | "idea" | "other";

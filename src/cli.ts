@@ -24,6 +24,8 @@ Repos and tickets
   acutis ticket cancel <ticket-id>
   acutis proposed                              Tickets scouts filed that wait for you
   acutis accept|reject <ticket-id>             Accept a proposed ticket onto todo, or reject it
+  acutis library <repo>                        Indexed doc commits, and how far describing got (with its cost)
+  acutis gaps [--all] | gaps dismiss <id>      Questions workers couldn't answer from the docs (the Docs scout reads these)
   acutis noticed [--all]                       Problems workers noticed outside their tickets
   acutis noticed ticket|dismiss <id>           Turn one into a ticket, or dismiss it
 
@@ -448,6 +450,32 @@ switch (cmd) {
     if (!sub || !rest[0]) die("usage: acutis scout <repo> <type>");
     const run = await post(`/api/repos/${encodeURIComponent(sub)}/scouts/${encodeURIComponent(rest[0])}`);
     console.log(run.state === "queued" ? `Scout run ${run.id} queued (run limit reached).` : `Scout run ${run.id} started: acutis watch ${run.id}`);
+    break;
+  }
+  case "library": {
+    if (!sub) die("usage: acutis library <repo>");
+    const rows = await api(`/api/repos/${encodeURIComponent(sub)}/library`);
+    if (!rows.length) console.log("Nothing indexed yet (it happens when a run starts).");
+    for (const r of rows) {
+      const d = r.describe_status
+        ? ` · descriptions ${r.describe_status}: ${r.described} written, ${r.cached} reused, ${r.thin} thin, ≈$${Number(r.cost_usd).toFixed(3)}${r.note ? ` (${r.note})` : ""}`
+        : "";
+      console.log(`${String(r.commit_id).slice(0, 12)}\t${r.files} docs, ${r.chunks} sections${d}`);
+    }
+    break;
+  }
+  case "gaps": {
+    if (sub === "dismiss") {
+      const id = runArg(rest[0], "acutis gaps dismiss <id>");
+      await post(`/api/gaps/${id}/dismiss`);
+      console.log(`Gap #${id} dismissed.`);
+      break;
+    }
+    const list = await api(`/api/gaps${sub === "--all" ? "?status=all" : ""}`);
+    if (!list.length) console.log("No open library gaps.");
+    for (const g of list) {
+      console.log(`#${g.id}\t×${g.count}\t${g.repo}\t${g.question}${g.status !== "open" ? `\t(${g.status}${g.ticket_id ? ` #${g.ticket_id}` : ""})` : g.ticket_id ? `\t(ticket #${g.ticket_id} pending)` : ""}`);
+    }
     break;
   }
   case "proposed": {

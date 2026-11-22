@@ -39,12 +39,18 @@ describe("library units", () => {
     expect(parseWorkflow("---\nlibrary:\n  include: [\"wiki/**/*.md\"]\n---\n", "t").library).toEqual({
       include: ["wiki/**/*.md"],
       exclude: ["**/node_modules/**", "**/vendor/**", ".acutis/**"],
+      describe: false,
+      describe_budget_usd: 0.5,
+      librarian: true,
     });
+    expect(parseWorkflow("---\nlibrary:\n  librarian: false\n---\n", "t").library).toMatchObject({ librarian: false, describe: false });
     expect(() => parseWorkflow("---\nlibrary: [1]\n---\n", "t")).toThrow(/library/);
   });
 
   test("queries become quoted words, so FTS operators in the input can't break or widen the search", () => {
-    expect(ftsQuery('auth* OR "x" NEAR(a b) -token')).toBe('"auth" OR "or" OR "near" OR "token"');
+    expect(ftsQuery('auth* OR "x" NEAR(a b) -token')).toBe('"auth" OR "near" OR "token"');
+    expect(ftsQuery("how do I add a unit")).toBe('"add" OR "unit"');
+    expect(ftsQuery("what is it")).toBe('"what" OR "is" OR "it"'); // only stop words: keep them
     expect(ftsQuery("!!")).toBeNull();
   });
 
@@ -111,7 +117,7 @@ describe("library and noticed in runs", () => {
     const run = await app.runs.start(ticket("t").id);
     await waitFor(() => app.store.getRun(run.id)!.state === "awaiting_review", 10000);
 
-    expect(out.token).toContain("docs/auth.md:5 · Auth > Tokens");
+    expect(out.token).toContain("docs/auth.md:5 [approved: trunk doc] · Auth > Tokens");
     expect(out.token!.length).toBeLessThan(SEARCH_BUDGET_CHARS + 200);
     expect(out.read).toContain("The daemon token lives in ACUTIS_HOME");
     expect(out.secret).toContain("No library results");
@@ -138,7 +144,7 @@ describe("library and noticed in runs", () => {
     await app.runs.approve(r1.id);
     const r2 = await app.runs.start(ticket("Next").id);
     await waitFor(() => app.store.getRun(r2.id)!.state === "awaiting_review", 10000);
-    expect(found).toContain(`run ${r1.id} (landed; summary written by its worker) · Run ${r1.id}: Cache tuning`);
+    expect(found).toContain(`run ${r1.id} [reviewed: landed run, summary written by its worker] · Run ${r1.id}: Cache tuning`);
   });
 
   test("run summary ids stay valid after another run lands", async () => {

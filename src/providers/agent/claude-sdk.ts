@@ -2,7 +2,10 @@ import { createSdkMcpServer, query, tool, type Options, type SDKMessage, type SD
 import { resolve } from "node:path";
 import { z } from "zod";
 import { isInside, outsidePaths } from "../../core/paths";
-import type { AcutisTool, AgentEvent, AgentRunner, AgentSession, AgentSpec } from "../../core/types";
+import type { AcutisTool, AgentEvent, AgentRunner, AgentSession, AgentSpec, OneShotModel } from "../../core/types";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const SECRET_PATHS = [".ssh", ".aws", ".gnupg", ".config/gh", ".claude/.credentials.json", ".netrc", ".npmrc"];
@@ -65,6 +68,22 @@ function acutisServer(tools: AcutisTool[]) {
       );
     }),
   });
+}
+
+/** The SDK's per-model totals, reduced to plain numbers (what the context-size comparison needs). */
+function modelUsage(u: unknown): NonNullable<Extract<AgentEvent, { kind: "agent.result" }>["model_usage"]> | undefined {
+  if (!u || typeof u !== "object") return undefined;
+  const out: NonNullable<Extract<AgentEvent, { kind: "agent.result" }>["model_usage"]> = {};
+  for (const [model, v] of Object.entries(u as Record<string, any>)) {
+    out[model] = {
+      inputTokens: Number(v?.inputTokens ?? 0),
+      outputTokens: Number(v?.outputTokens ?? 0),
+      cacheReadInputTokens: Number(v?.cacheReadInputTokens ?? 0),
+      cacheCreationInputTokens: Number(v?.cacheCreationInputTokens ?? 0),
+      costUSD: Number(v?.costUSD ?? 0),
+    };
+  }
+  return out;
 }
 
 function stringifyToolResult(content: unknown): string {
@@ -259,6 +278,7 @@ class ClaudeSdkSession implements AgentSession {
           turns: Number(msg.num_turns ?? 0),
           duration_ms: Number(msg.duration_ms ?? 0),
           errors: Array.isArray(msg.errors) ? msg.errors.map(String) : undefined,
+          model_usage: modelUsage((msg as any).modelUsage),
         };
         return;
     }
@@ -298,6 +318,54 @@ class ClaudeSdkSession implements AgentSession {
     try {
       this.q.close();
     } catch {}
+  }
+}
+
+/** Cheap, isolated one-shot calls (see OneShotModel). Verified 2026-11-21: offered no tools, ignores injected instructions. */
+export class ClaudeSdkOneShot implements OneShotModel {
+  constructor(private defaultModel = process.env.ACUTIS_LIBRARY_MODEL || "claude-haiku-5-5") {}
+
+  async ask(opts: Parameters<OneShotModel["ask"]>[0]): Promise<{ text: string; costUsd: number; error?: string }> {
+    const cwd = mkdtempSync(join(tmpdir(), "acutis-oneshot-"));
+    const tools = opts.tools ?? [];
+    const names = new Set(tools.map((t) => `mcp__acutis__${t.name}`));
+    let text = "";
+    let costUsd = 0;
+    let error: string | undefined;
+    try {
+      const q = query({
+        prompt: opts.prompt,
+        options: {
+          cwd,
+          model: opts.model ?? this.defaultModel,
+          systemPrompt: opts.system,
+          tools: [], // no built-in tools at all
+          settingSources: [],
+          strictMcpConfig: true,
+          mcpServers: tools.length ? { acutis: acutisServer(tools) } : {},
+          settings: { disableClaudeAiConnectors: true },
+          maxTurns: opts.maxTurns,
+          maxBudgetUsd: opts.maxBudgetUsd,
+          env: { ...process.env, ACUTIS_WORKER: "1" },
+          canUseTool: async (name, input, { mcpServer }) =>
+            mcpServer?.source === "sdk" && mcpServer.name === "acutis" && names.has(name)
+              ? { behavior: "allow", updatedInput: input }
+              : { behavior: "deny", message: "not available here" },
+        },
+      });
+      for await (const m of q) {
+        if (m.type === "result") {
+          costUsd = Number(m.total_cost_usd ?? 0);
+          if (m.subtype === "success") text = typeof m.result === "string" ? m.result : "";
+          else error = m.subtype;
+        }
+      }
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+    return { text, costUsd, error };
   }
 }
 
