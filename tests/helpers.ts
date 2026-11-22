@@ -30,8 +30,8 @@ export interface FakeControls {
   /** Resolves when interrupt() is called. */
   interrupted(): Promise<void>;
   closed: boolean;
-  /** End the turn. `cost` is the session's running total, like the real SDK reports. */
-  result(subtype?: string, cost?: number): void;
+  /** End the turn. `cost` is the session's running total, like the real SDK reports; `text` the agent's final report. */
+  result(subtype?: string, cost?: number, text?: string): void;
   /** Set the running total that totalCost() reports mid-turn (undefined: report nothing). */
   setTotal(total: number | undefined): void;
   /** While set, totalCost() waits for it before answering (to simulate a slow poll). */
@@ -86,8 +86,8 @@ class FakeSession implements AgentSession {
       set holdTotal(p) {
         self.holdTotal = p;
       },
-      result: (subtype = "success", cost = 0.01) =>
-        this.push({ kind: "agent.result", subtype, result: "", is_error: subtype !== "success", cost_usd: cost, turns: 1, duration_ms: 5 }),
+      result: (subtype = "success", cost = 0.01, text = "") =>
+        this.push({ kind: "agent.result", subtype, result: text, is_error: subtype !== "success", cost_usd: cost, turns: 1, duration_ms: 5 }),
     };
     queueMicrotask(async () => {
       this.push({ kind: "agent.init", session_id: spec.resumeSessionId ?? crypto.randomUUID(), model: "fake", sandboxed: false });

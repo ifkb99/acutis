@@ -2,8 +2,8 @@ import type { HubMessage } from "../core/hub";
 
 /**
  * Tell the operator when something needs them. A permission request, or a run reaching review or
- * failing, is sent at once. Questions (from scouts, contract requests) and proposed tickets (from
- * scouts, a worker's request_work) arrive in bursts, so they are batched: one notification once
+ * failing, is sent at once. Questions (from scouts, contract requests), proposed tickets (from
+ * scouts, a worker's request_work) and proposed lessons arrive in bursts, so they are batched: one notification once
  * things go quiet for a minute, and never more than five minutes after the first.
  * Desktop notifications via notify-send (if installed), and/or a POST to a webhook such as an
  * ntfy.sh topic. ACUTIS_NOTIFY=off disables desktop notifications; ACUTIS_NOTIFY_URL sets the webhook.
@@ -39,23 +39,35 @@ export function makeNotifier(opts: {
 
   // Questions for the operator and tickets waiting for them arrive in bursts (a scout files several
   // at once), so they are batched into one notification, sent when the burst settles.
-  const batch = { questions: [] as string[], proposed: 0, first: 0 };
+  const batch = { questions: [] as string[], proposed: 0, lessons: 0, stale: 0, first: 0 };
   let timer: ReturnType<typeof setTimeout> | null = null;
   const flush = () => {
     if (timer) clearTimeout(timer);
     timer = null;
     const q = batch.questions.length;
     const p = batch.proposed;
-    if (!q && !p) return;
-    const parts = [q ? `${q} question${q > 1 ? "s" : ""}` : "", p ? `${p} proposed ticket${p > 1 ? "s" : ""}` : ""].filter(Boolean);
+    const l = batch.lessons;
+    const st = batch.stale;
+    if (!q && !p && !l && !st) return;
+    const parts = [
+      q ? `${q} question${q > 1 ? "s" : ""}` : "",
+      p ? `${p} proposed ticket${p > 1 ? "s" : ""}` : "",
+      l ? `${l} proposed lesson${l > 1 ? "s" : ""}` : "",
+      st ? `${st} lesson${st > 1 ? "s" : ""} to recheck` : "",
+    ].filter(Boolean);
     const lines = batch.questions.slice(0, 3).map((t) => `• ${t.slice(0, 120)}`);
-    send(`Acutis: ${parts.join(" and ")} waiting for you`, [...lines, q > 3 ? `…and ${q - 3} more` : ""].filter(Boolean).join("\n"), null);
+    const said = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
+    send(`Acutis: ${said} waiting for you`, [...lines, q > 3 ? `…and ${q - 3} more` : ""].filter(Boolean).join("\n"), null);
     batch.questions = [];
     batch.proposed = 0;
+    batch.lessons = 0;
+    batch.stale = 0;
     batch.first = 0;
   };
-  const queue = (question: string | null) => {
+  const queue = (question: string | null, what: "ticket" | "lesson" | "stale" = "ticket") => {
     if (question) batch.questions.push(question);
+    else if (what === "lesson") batch.lessons++;
+    else if (what === "stale") batch.stale++;
     else batch.proposed++;
     const now = Date.now();
     if (!batch.first) batch.first = now;
@@ -83,6 +95,10 @@ export function makeNotifier(opts: {
         queue(`Change the ${d.contract} contract: ${d.change}`);
       } else if ((kind === "scout.ticket" || kind === "work.request") && d.status === "proposed" && !d.existing) {
         queue(null);
+      } else if (kind === "lesson.proposed") {
+        queue(null, "lesson");
+      } else if (kind === "lesson.stale") {
+        queue(null, "stale");
       }
     },
     /** Send anything batched now and wait (up to timeoutMs) for webhook posts to finish: daemon shutdown. */

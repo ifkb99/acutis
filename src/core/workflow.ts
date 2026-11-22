@@ -1,5 +1,6 @@
 import { DEFAULT_LIBRARY_EXCLUDE, DEFAULT_LIBRARY_INCLUDE } from "./library";
 import { DEFAULT_SCOUT_BUDGET_USD, SCOUT_TYPES, decisionsSection } from "./scouts";
+import { type GivenLesson, lessonsSection } from "./lessons";
 import type { BrowserGate, CommandGate, Decision, Gate, PreviewSpec, Repo, Ticket, Workflow } from "./types";
 
 export const WORKFLOW_PATH = ".acutis/workflow.md";
@@ -80,8 +81,9 @@ export function defaultWorkflow(): Workflow {
     template: DEFAULT_TEMPLATE,
     source: "(default)",
     library: { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE], describe: false, describe_budget_usd: 0.5, librarian: true },
-    scouts: { auto_tickets: "high", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {} },
+    scouts: { auto_tickets: "high", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {}, trigger_debounce_min: 10, trigger_daily_cap: 3 },
     contracts: {},
+    lessons: { draft: true, budget_chars: 1500 },
   };
 }
 
@@ -161,11 +163,19 @@ function parseContracts(v: unknown): Workflow["contracts"] {
 }
 
 /**
- * `scouts: false`, or `scouts: { auto_tickets: high|never, budget_usd: N, <type>: true | false | { focus, budget_usd } }`.
+ * `scouts: false`, or `scouts: { auto_tickets: high|never, budget_usd: N, trigger_debounce_min: N, trigger_daily_cap: N,
+ *   <type>: true | false | { focus, budget_usd, triggers: [globs] } }`. A scout with `triggers` wakes
+ *   when trunk changes a matching path.
  * Every built-in scout is allowed unless turned off; the repo can't define new ones.
  */
 function parseScouts(v: unknown): Workflow["scouts"] {
-  const out = { auto_tickets: "high" as "high" | "never", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {} as Record<string, { enabled: boolean; focus: string; budget_usd?: number }> };
+  const out = {
+    auto_tickets: "high" as "high" | "never",
+    budget_usd: DEFAULT_SCOUT_BUDGET_USD,
+    types: {} as Record<string, { enabled: boolean; focus: string; budget_usd?: number; triggers?: string[] }>,
+    trigger_debounce_min: 10,
+    trigger_daily_cap: 3,
+  };
   if (v === false) return false;
   if (v === undefined || v === null || v === true) return out;
   if (typeof v !== "object" || Array.isArray(v)) throw new Error('workflow: "scouts" must be false or a map');
@@ -176,19 +186,47 @@ function parseScouts(v: unknown): Workflow["scouts"] {
     } else if (k === "budget_usd") {
       if (typeof val !== "number" || !(val > 0)) throw new Error('workflow: "scouts.budget_usd" must be a positive number');
       out.budget_usd = val;
+    } else if (k === "trigger_debounce_min") {
+      if (typeof val !== "number" || !(val >= 0) || val > 1440) throw new Error('workflow: "scouts.trigger_debounce_min" must be a number of minutes from 0 to 1440');
+      out.trigger_debounce_min = val;
+    } else if (k === "trigger_daily_cap") {
+      if (typeof val !== "number" || !Number.isInteger(val) || val < 0 || val > 50) throw new Error('workflow: "scouts.trigger_daily_cap" must be a whole number from 0 to 50');
+      out.trigger_daily_cap = val;
     } else if (SCOUT_TYPES[k]) {
       if (typeof val === "boolean") out.types[k] = { enabled: val, focus: "" };
       else if (val && typeof val === "object") {
         const t = val as Record<string, unknown>;
+        if (t.triggers !== undefined && (!Array.isArray(t.triggers) || !t.triggers.every((g) => typeof g === "string" && g.length > 0))) {
+          throw new Error(`workflow: "scouts.${k}.triggers" must be a list of path globs`);
+        }
         out.types[k] = {
           enabled: t.enabled !== false,
           focus: typeof t.focus === "string" ? t.focus.slice(0, 1000) : "",
           budget_usd: typeof t.budget_usd === "number" && t.budget_usd > 0 ? t.budget_usd : undefined,
+          triggers: (t.triggers as string[] | undefined)?.slice(0, 50),
         };
-      } else throw new Error(`workflow: "scouts.${k}" must be true, false or { focus, budget_usd }`);
+      } else throw new Error(`workflow: "scouts.${k}" must be true, false or { focus, budget_usd, triggers }`);
     } else {
       throw new Error(`workflow: unknown scout "${k}" (known: ${Object.keys(SCOUT_TYPES).join(", ")})`);
     }
+  }
+  return out;
+}
+
+/** `lessons: false`, or `lessons: { draft: bool, budget_chars: N }`. On by default. */
+function parseLessons(v: unknown): Workflow["lessons"] {
+  if (v === false) return false;
+  const out = { draft: true, budget_chars: 1500 };
+  if (v === undefined || v === null || v === true) return out;
+  if (typeof v !== "object" || Array.isArray(v)) throw new Error('workflow: "lessons" must be false or a map');
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    if (k === "draft") {
+      if (typeof val !== "boolean") throw new Error('workflow: "lessons.draft" must be true or false');
+      out.draft = val;
+    } else if (k === "budget_chars") {
+      if (typeof val !== "number" || !(val >= 200) || val > 8000) throw new Error('workflow: "lessons.budget_chars" must be a number from 200 to 8000');
+      out.budget_chars = Math.floor(val);
+    } else throw new Error(`workflow: unknown lessons setting "${k}" (known: draft, budget_chars)`);
   }
   return out;
 }
@@ -250,6 +288,7 @@ export function parseWorkflow(text: string, source: string): Workflow {
   wf.library = parseLibrary(meta.library);
   wf.scouts = parseScouts(meta.scouts);
   wf.contracts = parseContracts(meta.contracts);
+  wf.lessons = parseLessons(meta.lessons);
   return wf;
 }
 
@@ -287,6 +326,8 @@ export function workerSystemPrompt(opts: {
   repo?: Repo;
   sandboxed?: boolean;
   decisions?: Decision[];
+  /** Approved lessons chosen for this run (operator-approved text). */
+  lessons?: GivenLesson[];
   /** Whether ask_librarian is actually offered (the setting, and a model to run it). */
   librarian?: boolean;
 }): string {
@@ -327,7 +368,7 @@ Rules:
 
 When you finish, Acutis runs these checks in the workspace:
 ${gates}
-Run them yourself first where you can.${
+Run them yourself first${opts.workflow.gates.some((g) => g.kind === "cmd") ? ` with \`mcp__acutis__run_checks\`, which runs them exactly as Acutis will (in your own shell, a check that uses Unix sockets fails for sandbox reasons, not because of your change)` : " where you can"}.${
     opts.workflow.library
       ? `
 
@@ -339,7 +380,7 @@ Project knowledge: \`mcp__acutis__search_project\` searches this repo's docs (as
       : ""
   }
 
-${contractsSection(opts.workflow)}Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket. If your ticket can't be complete without work that belongs elsewhere (another package, a missing API), ask for it with \`mcp__acutis__request_work\` instead of doing it here.${preview}${notes}${decisionsSection(opts.decisions ?? [])}
+${contractsSection(opts.workflow)}Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket. If your ticket can't be complete without work that belongs elsewhere (another package, a missing API), ask for it with \`mcp__acutis__request_work\` instead of doing it here.${opts.workflow.lessons ? " If you learn something about this repo that would save the next agent time (a build order, a quirk, a workaround the checks needed), propose it with `mcp__acutis__propose_lesson`." : ""}${preview}${notes}${decisionsSection(opts.decisions ?? [])}${lessonsSection(opts.lessons ?? [])}
 
 End with a short summary: what you changed, why, and how you verified it.`;
 }

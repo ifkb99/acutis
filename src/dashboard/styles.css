@@ -118,6 +118,10 @@ code, pre { font-family: var(--mono); font-size: 12.5px; }
 .decision-item .detail { color: var(--muted); font-size: 12px; white-space: pre-wrap; }
 .decision-item .held label { font-size: 12px; gap: 6px; }
 .decision-item .muted, .decided .muted, .scout-repo .muted { color: var(--muted); font-size: 12px; }
+.lesson-item, .lesson-done { display: flex; flex-direction: column; gap: 6px; cursor: default; }
+.lesson-item textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); resize: vertical; }
+.lesson-item .detail { color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+.lesson-item .muted, .lessons .muted { color: var(--muted); font-size: 12px; }
 .row.wrap { flex-wrap: wrap; }
 .chip.proposed, .chip.held { color: var(--muted); border-style: dashed; }
 .chip.conf-high { color: var(--ok); border-color: var(--ok); }

@@ -57,6 +57,8 @@ export interface Run {
   kind: "work" | "scout";
   /** The scout type, for scout runs. */
   scout: string | null;
+  /** For a scout woken by a trunk change: JSON { from, to, paths }. */
+  woken_by: string | null;
   state: RunState;
   workspace_name: string | null;
   workspace_path: string | null;
@@ -141,6 +143,8 @@ export interface WorkspaceProvider {
   advance(repo: Repo, ws: Workspace, bookmark: string): Promise<void>;
   /** True if `name` is a local bookmark in the repo. */
   isBookmark(repo: Repo, name: string): Promise<boolean>;
+  /** Pick up trunk moves made outside the provider (e.g. a git pull in a colocated repo). Never fetches. */
+  refresh?(repo: Repo): Promise<void>;
   /** Forget the workspace and delete its directory. Keeps the change unless abandon=true. */
   destroy(repo: Repo, ws: Workspace, opts: { abandon: boolean }): Promise<void>;
 }
@@ -361,13 +365,23 @@ export interface Workflow {
    * `check` an optional command run as an extra check when a run touches either.
    */
   contracts: Record<string, Contract>;
+  /**
+   * Lessons: short operator-approved how-tos for this repo, put in worker and scout prompts.
+   * `draft`: after a run reaches review, a cheap model may propose one from its report.
+   * `budget_chars`: how much lesson text one prompt gets. false turns lessons off for the repo.
+   */
+  lessons: { draft: boolean; budget_chars: number } | false;
   /** Scouts the repo allows, with a focus and budget each; false turns scouts off. */
   scouts:
     | {
         /** high: high-confidence scout tickets go straight to todo. never: all wait in proposed. */
         auto_tickets: "high" | "never";
         budget_usd: number;
-        types: Record<string, { enabled: boolean; focus: string; budget_usd?: number }>;
+        types: Record<string, { enabled: boolean; focus: string; budget_usd?: number; triggers?: string[] }>;
+        /** Wait this long after a trigger before waking the scout, so a burst of landings wakes it once. */
+        trigger_debounce_min: number;
+        /** Most trigger-woken scout runs per repo in 24 hours. */
+        trigger_daily_cap: number;
       }
     | false;
 }
@@ -424,6 +438,35 @@ export interface Contract {
 
 export type NoticedKind = "bug" | "failing-check" | "tech-debt" | "docs" | "security" | "idea" | "other";
 export const NOTICED_KINDS: NoticedKind[] = ["bug", "failing-check", "tech-debt", "docs", "security", "idea", "other"];
+
+/**
+ * A lesson: a short, repo-level how-to ("the harness needs the engine built first"). Agents and the
+ * report-drafting model propose them; only approved ones (or operator-written ones) reach a prompt.
+ */
+export interface Lesson {
+  id: number;
+  repo: string;
+  text: string;
+  /** Normalised text, for dedupe across every status. */
+  text_key: string;
+  evidence: string;
+  tags: string;
+  status: "proposed" | "approved" | "rejected" | "retired";
+  /** "worker", "scout:<type>", "draft" (from a run's report) or "operator". */
+  source: string;
+  run_id: number | null;
+  /** How many runs were given it. */
+  uses: number;
+  /** Comma-separated paths/globs the lesson is about; null until derived from its text, "" if none. */
+  paths: string | null;
+  /** The trunk commit it was last checked against (approved lessons with paths). */
+  seen_commit: string | null;
+  /** JSON { paths, commit } once trunk changed its paths: it waits for the operator to recheck it. */
+  stale: string | null;
+  created_at: string;
+  updated_at: string;
+  decided_at: string | null;
+}
 
 /** Something a worker noticed outside its ticket. Reports with the same title in a repo are merged. */
 export interface Noticed {

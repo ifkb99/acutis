@@ -115,6 +115,28 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
       "/api/decisions/:id/supersede": {
         POST: api(async (req) => runs.supersedeDecision(Number(req.params.id), String((await body(req)).decision ?? ""))),
       },
+      "/api/lessons": {
+        GET: api((req) => {
+          const q = new URL(req.url).searchParams;
+          const status = q.get("status");
+          return runs.listLessons(q.get("repo") ?? undefined, status === "all" ? undefined : ((status as any) ?? undefined));
+        }),
+        POST: api(async (req) => {
+          const b = await body(req);
+          return runs.addLesson(String(b.repo ?? ""), String(b.text ?? ""), b.tags ? String(b.tags) : "");
+        }),
+      },
+      "/api/lessons/:id/approve": {
+        POST: api(async (req) => {
+          const b = await body(req);
+          return runs.approveLesson(Number(req.params.id), b.text ? String(b.text) : undefined);
+        }),
+      },
+      "/api/lessons/:id/edit": { POST: api(async (req) => runs.editLesson(Number(req.params.id), String((await body(req)).text ?? ""))) },
+      "/api/lessons/:id/reject": { POST: api((req) => runs.rejectLesson(Number(req.params.id))) },
+      "/api/lessons/:id/retire": { POST: api((req) => runs.retireLesson(Number(req.params.id))) },
+      "/api/lessons/:id/confirm": { POST: api((req) => runs.confirmLesson(Number(req.params.id))) },
+      "/api/lessons/:id/paths": { POST: api(async (req) => runs.setLessonPaths(Number(req.params.id), String((await body(req)).paths ?? ""))) },
       "/api/tickets/:id/accept": { POST: api((req) => runs.acceptTicket(Number(req.params.id))) },
       "/api/tickets/:id/reject": { POST: api((req) => runs.rejectTicket(Number(req.params.id))) },
       "/api/repos/:name/library": {

@@ -209,7 +209,7 @@ describe("library and noticed in runs", () => {
     const { app, ticket } = await setup([script], { "README.md": "# Demo\n", ".acutis/workflow.md": "---\nlibrary: false\n---\n" });
     const run = await app.runs.start(ticket("t").id);
     await waitFor(() => app.store.getRun(run.id)!.state === "awaiting_review", 10000);
-    expect(tools).toEqual(["report_noticed", "request_work"]);
+    expect(tools).toEqual(["report_noticed", "request_work", "propose_lesson"]);
   });
 
   test("noticed reports merge by title, cap per run, and become tickets that say they're worker-written", async () => {

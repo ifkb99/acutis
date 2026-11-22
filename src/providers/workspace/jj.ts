@@ -177,6 +177,11 @@ export class JjWorkspaceProvider implements WorkspaceProvider {
     await jj(ws.path, ["bookmark", "set", bookmark, "-r", "@"]);
   }
 
+  async refresh(repo: Repo): Promise<void> {
+    // Colocated repos: import git ref moves (a pull, a merge) without snapshotting the user's working copy.
+    await jj(repo.path, ["git", "import", "--ignore-working-copy"]);
+  }
+
   async isBookmark(repo: Repo, name: string): Promise<boolean> {
     if (!/^[A-Za-z0-9._\/-]+$/.test(name)) return false;
     const out = await jj(repo.path, ["bookmark", "list", "--ignore-working-copy", "-T", 'name ++ "\\n"']).catch(() => "");

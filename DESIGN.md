@@ -240,6 +240,102 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Phase 5 real run (2026-11-22, duke-ml copy, $1.10)
+
+- **Draft probe** (real cheap model on 9 earlier real reports, $0.006): 5 proposals. Three were
+  real repo findings, among them the duke-ml harness/tsx gotcha drafted word-perfect from the
+  contract run's report; one mixed; one restated the checks (the prompt now rules that out).
+- **Run 1** (harness ticket, no lessons, $0.43): the agent found the ticket's premise false (the
+  match CLI prints no per-game lines), stopped and asked how to proceed, which was right, so it never
+  reached the harness check. The drafter proposed a lesson from that report (about the CLI's output:
+  borderline, closer to this ticket than to the repo). **Caveat:** the run script approved it
+  reworded with pre-written harness/tsx text, so the approved lesson's content came from the
+  operator (and the probe), not from run 1's draft.
+- **Run 2** (another harness ticket, $0.24): given that lesson (the `lessons.given` event and its
+  prompt), it called `run_checks` once (all four checks passed, harness smoke included) and never
+  ran the harness in its own shell: 0 failed harness commands, against 2 of 2 earlier real runs
+  that failed first. Both the lesson and the new `run_checks` prompt line were present, so this
+  shows the gotcha avoided, not which of the two did it. It is the first time a real worker used an
+  optional Acutis tool.
+- **Trigger** ($0.43): first look recorded trunk; a git commit to `packages/harness/package.json`
+  woke the Infrastructure scout exactly once (a second check found nothing to do). The scout read
+  the diff, judged it harmless, and then filed one high-confidence ticket about the rest of that
+  manifest: `npm run build -w packages/harness` fails (no tsconfig), entry points that don't exist,
+  undeclared dependencies on engine and tsx, and no typecheck of the harness.
+
+### Workers run checks through Acutis (2026-11-22)
+
+- **The problem.** On Linux the worker's own shell (the Agent SDK's sandbox) blocks every Unix
+  socket with seccomp: it can't filter by path. Tools that use socket IPC fail there, e.g. `npx
+  tsx`, so `npm test -w packages/harness` on duke-ml failed for both real workers, who then hunted
+  for a workaround. Acutis's own check sandbox allows sockets (it hides `/run`, where the dangerous
+  ones live, and has no network), so the same check passed at verification.
+- **Not the fix:** `allowAllUnixSockets` would also let the worker reach D-Bus, docker.sock and
+  similar, which are ways out of the sandbox.
+- **The fix:** `run_checks(names?)` runs the repo's declared command checks (trunk policy only,
+  never arbitrary commands) in Acutis's check sandbox, exactly as verification will, and returns
+  pass/fail with the end of each failure's output. Results are logged as `worker-check.result`,
+  separate from Acutis's own `gate.result`; verification still runs after. Up to 20 checks a run,
+  one at a time. The prompt's checks paragraph points at it.
+
+### Trunk triggers (2026-11-22, phase 5 of the scouts plan)
+
+- **Opt-in, in trunk's workflow**: `scouts: { <type>: { triggers: [globs] }, trigger_debounce_min,
+  trigger_daily_cap }` (defaults 10 minutes and 3 runs per repo per day). Nothing is triggered
+  unless a scout lists triggers.
+- **Detection from commits.** Acutis keeps, per repo and triggered scout, the last trunk commit it
+  has dealt with (`trunk_seen`), so one busy scout doesn't hold back another. A check compares it with trunk now and asks jj which watched paths changed in
+  between, under the *current* trunk's policy. The first check only records. Checks run after
+  every `land: trunk` landing and every 5 minutes in the daemon (`ACUTIS_TRUNK_CHECK_S`, at least
+  30). Only repos whose trunk declares triggers are touched: for them a check starts with
+  `jj git import --ignore-working-copy`, so a pull or merge done with git in a colocated repo
+  counts (and, as with any jj command there, a deleted git branch is dropped from jj). Nothing is
+  ever fetched: a merge on GitHub counts once it's pulled. If the last-seen commit is gone, the
+  scout starts again from trunk.
+- **Debounce.** The first change schedules a wake after the debounce; later changes in that window
+  join it, and the wake looks at everything from the last-seen commit to trunk then. The last-seen
+  commit advances only when the change has been dealt with (woken, capped, or nothing watched it),
+  so a restart during the debounce finds the change again. Checks are serialised per repo.
+- **Limits.** Over the daily cap, the change is noted (and logged) without a run. If the scout is
+  already running, the change stays unseen and wakes it again once it's free. A woken scout uses
+  its normal budget, is marked `woken_by` (with the commits and paths), and its brief starts with
+  the changed paths and their diff (capped at 6000 characters) as data. Its tickets and questions reach the operator through the batched
+  notifications.
+
+### Lessons (2026-11-22, phase 5 of the scouts plan)
+
+- **Why push, not pull.** Real agents never called the optional knowledge tools (librarian 0 of 4
+  A/B runs; scouts never searched the library). So lessons go into the prompt instead of waiting
+  to be fetched.
+- **A lesson** is one or two sentences (≤300 characters), per repo, with evidence, a source
+  (`worker`, `scout:<type>`, `draft`, `operator`) and a status: proposed, approved, rejected,
+  retired. Dedupe is by normalised text across every status, so a rejected lesson isn't proposed
+  again.
+- **Sources.** `propose_lesson` for workers and scouts (three per run). And the push source: after a
+  worker run reaches review, a cheap model (the library model) reads its final report plus any
+  checks that failed on earlier attempts and proposes at most one lesson, or NONE. Once per run (a
+  send-back that returns to review doesn't draft again), and only when the checks pass. It runs after
+  review starts, capped at $0.03, with a timeout; it can't delay or fail the run, and its cost is
+  added to the run. Across 19 real runs on disk none needed a retry, so drafting only after
+  retries would almost never fire; the report is where agents mention workarounds.
+- **Only approved text reaches a prompt**, in its own section after the operator decisions. All
+  approved lessons go in if they fit `budget_chars` (default 1500); otherwise the cheap model picks
+  among the 40 best keyword matches (ids it invents are dropped), falling back to keywords on any
+  error, timeout or reply without valid ids (only an explicit NONE means "none of them"). Selection happens once, at the run's start, and is stored in a
+  `lessons.given` event: resumed sessions and send-backs reuse that exact text, so the system
+  prompt never changes mid-run (and later edits don't reach a run already going).
+- **Expiry.** An approved lesson watches the paths it's about: given by the proposer
+  (`propose_lesson` `paths`) or the operator (`acutis lesson paths`), or derived once from repo
+  file names in its text and evidence (exact files, path suffixes, directories as `dir/**`). It
+  records the trunk commit it was last checked against; when trunk changes those paths it's
+  flagged "recheck" and held back from prompts until the operator confirms it (`acutis lesson
+  confirm`, "Still true"), edits it, or retires it. Checked at every run start, after trunk
+  landings, and on the daemon's trunk timer; flags reach the batched notifications. Lessons
+  naming no repo file never expire (and an operator can clear a lesson's paths for that).
+- **Operator.** Dashboard Lessons panel (approve with an edit box, reject, retire), `acutis lessons`
+  / `acutis lesson approve|reject|retire|edit|add`. Proposed lessons join the batched
+  notifications. `lessons: false` turns off the tool, drafting and the prompt section.
+
 ### Needs between areas (2026-11-22)
 
 - **`request_work(title, need, why)`** is for work a worker's ticket depends on that belongs

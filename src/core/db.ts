@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Decision, LibraryGap, Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
+import type { Decision, Lesson, LibraryGap, Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS repos (
@@ -94,6 +94,26 @@ CREATE TABLE IF NOT EXISTS library_gaps (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+CREATE TABLE IF NOT EXISTS lessons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  text TEXT NOT NULL,
+  text_key TEXT NOT NULL,
+  evidence TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'proposed',
+  source TEXT NOT NULL,
+  run_id INTEGER,
+  uses INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  decided_at TEXT
+);
+CREATE TABLE IF NOT EXISTS trunk_seen (
+  repo TEXT PRIMARY KEY,
+  commit_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS runs_ticket ON runs(ticket_id);
 `;
@@ -120,6 +140,10 @@ export class Store {
     if (!has("tickets", "confidence")) this.db.exec("ALTER TABLE tickets ADD COLUMN confidence TEXT");
     if (!has("tickets", "decision_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN decision_id INTEGER");
     if (!has("tickets", "noticed_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN noticed_id INTEGER");
+    if (!has("runs", "woken_by")) this.db.exec("ALTER TABLE runs ADD COLUMN woken_by TEXT");
+    if (!has("lessons", "paths")) this.db.exec("ALTER TABLE lessons ADD COLUMN paths TEXT");
+    if (!has("lessons", "seen_commit")) this.db.exec("ALTER TABLE lessons ADD COLUMN seen_commit TEXT");
+    if (!has("lessons", "stale")) this.db.exec("ALTER TABLE lessons ADD COLUMN stale TEXT");
   }
 
   // ---- repos
@@ -141,12 +165,12 @@ export class Store {
   }
 
   // ---- runs
-  createRun(r: { ticket_id: number; repo: string; state: RunState; kind?: Run["kind"]; scout?: string | null }): Run {
+  createRun(r: { ticket_id: number; repo: string; state: RunState; kind?: Run["kind"]; scout?: string | null; woken_by?: string | null }): Run {
     const row = this.db
       .query<{ id: number }, any>(
-        "INSERT INTO runs (ticket_id, repo, state, kind, scout) VALUES ($ticket_id, $repo, $state, $kind, $scout) RETURNING id",
+        "INSERT INTO runs (ticket_id, repo, state, kind, scout, woken_by) VALUES ($ticket_id, $repo, $state, $kind, $scout, $woken_by) RETURNING id",
       )
-      .get({ ...r, kind: r.kind ?? "work", scout: r.scout ?? null })!;
+      .get({ ...r, kind: r.kind ?? "work", scout: r.scout ?? null, woken_by: r.woken_by ?? null })!;
     return this.getRun(row.id)!;
   }
   getRun(id: number): Run | null {
@@ -338,6 +362,76 @@ export class Store {
       .query<{ data: string }, [number, string]>("SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY id DESC LIMIT 1")
       .get(runId, kind);
     return row ? JSON.parse(row.data) : null;
+  }
+
+  // ---- trunk triggers
+  getTrunkSeen(repo: string): string | null {
+    return this.db.query<{ commit_id: string }, [string]>("SELECT commit_id FROM trunk_seen WHERE repo = ?").get(repo)?.commit_id ?? null;
+  }
+  setTrunkSeen(repo: string, commit: string) {
+    this.db
+      .query("INSERT INTO trunk_seen (repo, commit_id) VALUES (?1, ?2) ON CONFLICT(repo) DO UPDATE SET commit_id = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+      .run(repo, commit);
+  }
+  /** Trigger-woken scout runs in a repo since an ISO time. */
+  countTriggeredRuns(repo: string, sinceIso: string): number {
+    return this.db.query<{ n: number }, [string, string]>("SELECT COUNT(*) AS n FROM runs WHERE repo = ? AND woken_by IS NOT NULL AND created_at >= ?").get(repo, sinceIso)!.n;
+  }
+
+  // ---- lessons
+  addLesson(l: { repo: string; text: string; text_key: string; evidence?: string; tags?: string; status: Lesson["status"]; source: string; run_id?: number | null; paths?: string | null }): Lesson {
+    const row = this.db
+      .query<{ id: number }, any>(
+        `INSERT INTO lessons (repo, text, text_key, evidence, tags, status, source, run_id, decided_at, paths)
+         VALUES ($repo, $text, $text_key, $evidence, $tags, $status, $source, $run_id, $decided_at, $paths) RETURNING id`,
+      )
+      .get({
+        repo: l.repo,
+        text: l.text,
+        text_key: l.text_key,
+        evidence: l.evidence ?? "",
+        tags: l.tags ?? "",
+        status: l.status,
+        source: l.source,
+        run_id: l.run_id ?? null,
+        decided_at: l.status === "proposed" ? null : new Date().toISOString(),
+        paths: l.paths ?? null,
+      })!;
+    return this.getLesson(row.id)!;
+  }
+  getLesson(id: number): Lesson | null {
+    return this.db.query<Lesson, [number]>("SELECT * FROM lessons WHERE id = ?").get(id);
+  }
+  findLessonByKey(repo: string, key: string): Lesson | null {
+    return this.db.query<Lesson, [string, string]>("SELECT * FROM lessons WHERE repo = ? AND text_key = ? ORDER BY id DESC LIMIT 1").get(repo, key);
+  }
+  listLessons(filter: { repo?: string; status?: Lesson["status"] } = {}): Lesson[] {
+    return this.db
+      .query<Lesson, [string | null, string | null]>(
+        "SELECT * FROM lessons WHERE (?1 IS NULL OR repo = ?1) AND (?2 IS NULL OR status = ?2) ORDER BY id DESC",
+      )
+      .all(filter.repo ?? null, filter.status ?? null);
+  }
+  updateLesson(id: number, patch: { status?: Lesson["status"]; text?: string; text_key?: string }): Lesson {
+    const cur = this.getLesson(id)!;
+    const status = patch.status ?? cur.status;
+    this.db
+      .query(
+        "UPDATE lessons SET status = ?, text = ?, text_key = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), decided_at = CASE WHEN ? != status THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE decided_at END WHERE id = ?",
+      )
+      .run(status, patch.text ?? cur.text, patch.text_key ?? cur.text_key, status, id);
+    return this.getLesson(id)!;
+  }
+  /** Staleness bookkeeping: paths, the commit last checked, and the stale flag. */
+  setLessonWatch(id: number, patch: { paths?: string | null; seen_commit?: string | null; stale?: string | null }): Lesson {
+    for (const [k, v] of Object.entries(patch)) {
+      if (!["paths", "seen_commit", "stale"].includes(k)) continue;
+      this.db.query(`UPDATE lessons SET ${k} = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`).run(v ?? null, id);
+    }
+    return this.getLesson(id)!;
+  }
+  countLessonUse(ids: number[]) {
+    for (const id of ids) this.db.query("UPDATE lessons SET uses = uses + 1 WHERE id = ?").run(id);
   }
 
   // ---- events
