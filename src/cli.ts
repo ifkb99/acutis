@@ -122,11 +122,12 @@ async function serve(args: string[]) {
   app.hub.subscribe((m) => notifier.handle(m));
   // Previews, checks and agent processes belong to the daemon: take them down with it.
   let stopping = false;
-  const shutdown = () => {
+  const shutdown = async () => {
     if (stopping) return;
     stopping = true;
     app.runs.shutdown();
     killAllBrowsers();
+    await notifier.drain();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
@@ -249,6 +250,8 @@ function formatEvent(e: { id: number; kind: string; data: any }): string | null 
     case "contract.changed":
     case "contract.stale":
       return `⚠ ${d.msg}`;
+    case "work.request":
+      return `  requested work: ticket #${d.ticket} ${d.title}${d.existing ? " (already requested)" : " (proposed)"}`;
     case "contract.request":
       return `  requested a change to the ${d.contract} contract (decision #${d.decision}, ticket #${d.ticket}): ${d.change}`;
     case "scout.ticket":

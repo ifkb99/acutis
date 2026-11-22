@@ -339,7 +339,7 @@ Project knowledge: \`mcp__acutis__search_project\` searches this repo's docs (as
       : ""
   }
 
-${contractsSection(opts.workflow)}Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket.${preview}${notes}${decisionsSection(opts.decisions ?? [])}
+${contractsSection(opts.workflow)}Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket. If your ticket can't be complete without work that belongs elsewhere (another package, a missing API), ask for it with \`mcp__acutis__request_work\` instead of doing it here.${preview}${notes}${decisionsSection(opts.decisions ?? [])}
 
 End with a short summary: what you changed, why, and how you verified it.`;
 }

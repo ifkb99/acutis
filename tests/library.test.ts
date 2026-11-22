@@ -209,7 +209,7 @@ describe("library and noticed in runs", () => {
     const { app, ticket } = await setup([script], { "README.md": "# Demo\n", ".acutis/workflow.md": "---\nlibrary: false\n---\n" });
     const run = await app.runs.start(ticket("t").id);
     await waitFor(() => app.store.getRun(run.id)!.state === "awaiting_review", 10000);
-    expect(tools).toEqual(["report_noticed"]);
+    expect(tools).toEqual(["report_noticed", "request_work"]);
   });
 
   test("noticed reports merge by title, cap per run, and become tickets that say they're worker-written", async () => {
@@ -228,9 +228,11 @@ describe("library and noticed in runs", () => {
       await c.nextMessage();
     };
     const { app, ticket } = await setup([first, second], { "README.md": "# Demo\n" });
+    // Scripts go to sessions in start order; runs prepare in parallel, so start the second after the first.
     const r1 = await app.runs.start(ticket("one").id);
+    await waitFor(() => app.store.getRun(r1.id)!.state === "awaiting_review", 10000);
     const r2 = await app.runs.start(ticket("two").id);
-    await waitFor(() => ["awaiting_review"].includes(app.store.getRun(r2.id)!.state) && app.store.getRun(r1.id)!.state === "awaiting_review", 10000);
+    await waitFor(() => app.store.getRun(r2.id)!.state === "awaiting_review", 10000);
 
     const open = app.runs.listNoticed("open");
     const clippy = open.find((n) => n.title === "Clippy fails on base")!;

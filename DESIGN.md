@@ -240,6 +240,20 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Needs between areas (2026-11-22)
+
+- **`request_work(title, need, why)`** is for work a worker's ticket depends on that belongs
+  elsewhere: another package, a missing API, a fix someone else owns. `report_noticed` is for
+  problems a worker happens to see. One sentence in the prompt's "Outside your ticket" paragraph
+  draws that line.
+- It files a **proposed** ticket (source `work-request`, "Worker-written: check it before acting"),
+  never a todo one, and the ticket names the one waiting on it. Workers whose titles match once
+  normalised share one ticket (and one notification). A request the operator rejected isn't filed
+  again: the worker is told it was rejected. Each run can make three requests.
+- The requesting run gets a flag in its events. The worker is told to carry on and to say in its
+  summary what is unfinished until the requested work lands. Tickets have no dependency field, so
+  that link lives in the ticket body and the flag.
+
 ### Contracts (2026-11-22, phase 4 of the scouts plan)
 
 - **Declared in the workflow** (trunk policy): `contracts: { name: { files: [globs], consumers?: [globs], check?: command } }`.
@@ -576,8 +590,11 @@ The dashboard lists runs grouped by state. Each run shows:
   `nosniff`. Worker-written text renders in the dashboard as React elements only (a small
   Markdown subset; no raw HTML, http(s) links only, no images).
 - **Notifications:** `notify-send` if installed (`ACUTIS_NOTIFY=off` to disable) and/or a POST to
-  `ACUTIS_NOTIFY_URL`, on permission requests, review and failure. The tab title shows pending
-  permission requests.
+  `ACUTIS_NOTIFY_URL`. Permission requests, review and failure are sent at once. Questions (scout
+  questions, contract requests) and proposed tickets (from scouts, or a worker's `request_work`)
+  are batched: one notification when a minute passes without another, at most five minutes after
+  the first, and whatever is waiting is sent on shutdown. The tab title shows pending permission
+  requests.
 
 ## 10. Open questions
 

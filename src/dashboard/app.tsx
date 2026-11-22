@@ -298,9 +298,9 @@ function App() {
                     <div className="t">
                       #{t.id} {t.title}
                     </div>
-                    {t.source.startsWith("scout:") && (t.status === "proposed" || t.status === "todo") && (
+                    {(t.source.startsWith("scout:") || t.source === "work-request") && (t.status === "proposed" || t.status === "todo") && (
                       <details className="ticketbody" onClick={(e) => e.stopPropagation()}>
-                        <summary>Why the scout filed it</summary>
+                        <summary>{t.source === "work-request" ? "Why a worker asked for it" : "Why the scout filed it"}</summary>
                         <Markdown text={t.body} />
                       </details>
                     )}
@@ -1107,6 +1107,13 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
     case "contract.changed":
     case "contract.stale":
       return <div className="ev flag">⚠ {d.msg}</div>;
+    case "work.request":
+      return (
+        <div className="ev flag">
+          ⚠ This run asked for work outside its ticket: #{d.ticket} {d.title} ({d.existing ? `already requested, ${d.status}` : "proposed"}). Its summary should
+          say what is unfinished until that lands.
+        </div>
+      );
     case "contract.request":
       return (
         <div className="ev log">
