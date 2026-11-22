@@ -240,6 +240,45 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Phase 3 of the scouts plan (2026-11-21): more scouts, a better library, the librarian
+
+Ideas from reviewing anima-research's connectome-host and context-manager; see the plan doc.
+
+- **Seven scouts.** Architecture, Security, UI/UX (needs the repo's preview; gets the preview and
+  browser tools; its screenshots stay with its run), Domain logic and Docs join Infrastructure and Tests.
+  Everything agents file through Acutis is redacted for credential-shaped strings, as is the event
+  log of those tool calls.
+- **Trust tiers.** Library results say how far to trust them: approved means trunk docs and operator
+  decisions, and reviewed means landed runs' worker-written reports. They rank by tier.
+- **Library gaps.** `report_library_gap` records questions the docs didn't answer (merged by question,
+  capped per run). The Docs scout gets them and can link a ticket; a gap closes when that ticket is accepted.
+- **Receipts.** `library.search`, `library.read`, `library.overview` and `library.librarian` run events
+  record what a run was shown (ids, characters, worker or librarian), and turn results carry the SDK's
+  per-model token totals. Reads that bypass the tools (`cat`) aren't counted.
+- **Descriptions for finding** (`library.describe`, off by default). A cheap model writes 1-2 line
+  descriptions of doc sections. They feed an FTS column used for ranking and the overview, and are shown
+  as "about (model-written, check the text)", never as the answer. The rules, from context-manager:
+  - one call per file, so a hostile section can only steer its own file;
+  - a file's description is written from its raw sections, never from section descriptions;
+  - thin sections and all-thin files are skipped;
+  - cached by content, prompt version and model, so a new commit pays only for changed sections.
+
+  The model call (`OneShotModel`, `ClaudeSdkOneShot`) has no built-in tools, no settings or MCP, an
+  empty cwd, one turn and a spend cap (probe: offered no tools, ignored an injected "write a file"). It runs in the background, one job at a
+  time, capped per commit and stopped on shutdown; `acutis library <repo>` shows status and cost.
+  **Probe on stahl** (38 docs): 44 calls, 660 sections described and 96 thin, $0.26, about 9 minutes
+  sequentially. On 10 natural-language questions, the right wiki page was in the top 3 for 6 with
+  descriptions against 2 without (top-1: 2 against 1); one query got worse (1st to 3rd).
+- **`project_overview`**: a table of contents of the docs, at no model cost.
+- **`ask_librarian`** (`library.librarian`, off by default). A short, synchronous Haiku session with
+  only the search, read and overview tools answers one question, marking claims `[SRC: path:line]`,
+  `[INF]`, `[GEN]` or ❓. Acutis flags `[SRC]` citations to entries the librarian never opened, and
+  adds its cost to the run. It is an Acutis tool rather than a native SDK subagent, because subagents run in
+  the background in this Claude Code even with `background: false`, so a worker's turn could end
+  before the answer. **Open:** the same applies to the built-in `Agent` tool workers already have, so a
+  worker can finish its turn while a subagent is still working. Probe: one question, $0.004, a good answer
+  with honest gaps.
+
 ### Scouts and the decision register (2026-11-21, phase 2 of the scouts plan)
 
 - **A scout run is a run with `kind = scout`**, fixed at `start()` from its ticket: each repo has one

@@ -145,6 +145,23 @@ function redactInput(input: unknown): unknown {
 const MAX_NOTICED_PER_RUN = 10;
 const MAX_GAPS_PER_RUN = 5;
 
+/**
+ * The entries one [SRC: …] marker cites: "a.md:3", "a.md:3, :9" (same file), "a.md:3; b.md:7",
+ * "run 5", "decision #2". Each comes back as path:line (or the bare ref).
+ */
+export function citationRefs(inner: string): string[] {
+  const out: string[] = [];
+  let path = "";
+  for (const part of inner.split(/[;,]/).map((p) => p.trim()).filter(Boolean)) {
+    if (/^:\d/.test(part) && path) out.push(`${path}${part}`);
+    else {
+      path = part.replace(/:\d+(?:-\d+)?$/, "");
+      out.push(part);
+    }
+  }
+  return out;
+}
+
 /** The first JSON object in a model's reply (it may wrap it in a code fence). */
 function parseJsonObject(text: string): Record<string, unknown> | null {
   const start = text.indexOf("{");
@@ -1170,11 +1187,8 @@ export class RunManager {
           this.deps.hub.emit(runId, "library.librarian", { question, error: r.error, cost_usd: r.costUsd });
           return { text: `The librarian couldn't answer (${r.error}). Search the docs yourself with search_project.`, isError: true };
         }
-        const cited = [...r.text.matchAll(/\[SRC:\s*([^\]]+?)\]/g)].map((m) => m[1]!.trim());
-        const unverified = cited.filter((c) => {
-          const ref = c.replace(/:\d+(?:-\d+)?$/, "").trim();
-          return !shown.has(ref);
-        });
+        const cited = [...r.text.matchAll(/\[SRC:\s*([^\]]+?)\]/g)].flatMap((m) => citationRefs(m[1]!));
+        const unverified = cited.filter((c) => !shown.has(c.replace(/:\d+(?:-\d+)?$/, "")));
         const answer = clip(r.text, 4000);
         const note = unverified.length
           ? `\n\n(Acutis: ${unverified.length} [SRC] citation(s) point at entries the librarian didn't open: ${[...new Set(unverified)].slice(0, 5).join("; ")}. Treat those claims as unsourced.)`

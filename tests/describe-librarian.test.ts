@@ -134,6 +134,17 @@ describe("descriptions (for finding, not reading)", () => {
   });
 });
 
+describe("citations", () => {
+  test("one [SRC] marker can cite several entries, including same-file shorthand", async () => {
+    const { citationRefs } = await import("../src/core/runs");
+    expect(citationRefs("docs/a.md:41, :116")).toEqual(["docs/a.md:41", "docs/a.md:116"]);
+    expect(citationRefs("docs/a.md:64; README.md:11")).toEqual(["docs/a.md:64", "README.md:11"]);
+    expect(citationRefs("run 5")).toEqual(["run 5"]);
+    expect(citationRefs("decision #2")).toEqual(["decision #2"]);
+    expect(citationRefs("docs/a.md:3-9")).toEqual(["docs/a.md:3-9"]);
+  });
+});
+
 describe("overview and librarian", () => {
   test("project_overview lists doc files with headings and file descriptions, at no model cost", async () => {
     const describer = new FakeDescriber();
