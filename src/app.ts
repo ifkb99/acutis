@@ -27,7 +27,15 @@ export function loadConfig(): Config {
 
 export function createApp(
   cfg: Config,
-  opts: { runner?: AgentRunner; browser?: BrowserProvider; commandSandbox?: CommandSandbox; costPollMs?: number; oneShot?: OneShotModel } = {},
+  opts: {
+    runner?: AgentRunner;
+    browser?: BrowserProvider;
+    commandSandbox?: CommandSandbox;
+    costPollMs?: number;
+    oneShot?: OneShotModel;
+    backgroundGraceMs?: number;
+    backgroundMaxWaitMs?: number;
+  } = {},
 ) {
   const store = new Store(`${cfg.home}/acutis.db`);
   const hub = new Hub(store);
@@ -56,6 +64,8 @@ export function createApp(
     // Describing docs and the librarian use a cheap model; tests inject a fake (or none).
     oneShot: opts.oneShot ?? (opts.runner ? undefined : new ClaudeSdkOneShot(libraryModel)),
     libraryModel,
+    backgroundGraceMs: opts.backgroundGraceMs,
+    backgroundMaxWaitMs: opts.backgroundMaxWaitMs,
   });
   return { cfg, store, hub, tickets, workspaces, runner, runs, browser, sandbox, sandboxStatus, token };
 }

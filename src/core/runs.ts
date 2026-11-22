@@ -97,6 +97,10 @@ interface Active {
   scoutTickets: number;
   scoutDecisions: number;
   budgetStop: boolean;
+  /** Background tasks (e.g. subagents) the session reports running, and whether a finished turn waits on them. */
+  background: number;
+  awaitingBackground: boolean;
+  backgroundTimer: ReturnType<typeof setTimeout> | null;
 }
 
 function killGroup(proc: Subprocess) {
@@ -215,6 +219,10 @@ export class RunManager {
       oneShot?: OneShotModel;
       /** The model the one-shot calls use (part of the description cache key). */
       libraryModel?: string;
+      /** After background tasks finish, how long to wait for the agent's next turn before checking anyway. */
+      backgroundGraceMs?: number;
+      /** How long a turn's background tasks may run before Acutis checks the work anyway. */
+      backgroundMaxWaitMs?: number;
     },
   ) {
     this.browser = deps.browser ?? unavailableBrowser;
@@ -385,6 +393,9 @@ export class RunManager {
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
+      background: 0,
+      awaitingBackground: false,
+      backgroundTimer: null,
     };
     this.active.set(run.id, a);
 
@@ -675,6 +686,9 @@ export class RunManager {
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
+      background: 0,
+      awaitingBackground: false,
+      backgroundTimer: null,
     };
     this.active.set(runId, a);
     return a;
@@ -699,6 +713,7 @@ export class RunManager {
           autoTickets: settings?.auto_tickets ?? "never",
           sandboxed: Boolean(this.deps.agentSandboxed),
           library: Boolean(a.workflow.library),
+          librarian: Boolean(a.workflow.library && a.workflow.library.librarian && this.deps.oneShot),
           decisions,
           trunkResults: a.trunkResults ?? "(not re-run after a restart; run the checks yourself if you need them)",
         })
@@ -734,6 +749,8 @@ export class RunManager {
     a.turnCost = 0;
     a.costPoll = null;
     a.lastCostPoll = 0;
+    this.stopWaitingForBackground(a);
+    a.background = 0;
     if (!resumeSessionId) this.deps.store.updateRun(runId, { session_cost: null });
     if (this.deps.tickets.get(run.ticket_id)?.status !== "in_progress") {
       this.deps.hub.ticket(this.deps.tickets.setStatus(run.ticket_id, "in_progress"));
@@ -779,15 +796,27 @@ export class RunManager {
           } else if (intent === "kill" || intent === "close") {
             // ignore
           } else if (ev.subtype === "success") {
-            // A scout's turn ending is the scout finishing: no checks, no review, nothing lands.
-            if (this.mustGet(runId).kind === "scout") this.finishScout(runId, this.scoutTally(a));
-            else await this.verify(runId);
+            if (a.background > 0) {
+              // The turn ended but the agent's background subagents are still working; the SDK starts
+              // a new turn when they finish. Checking now would check unfinished work.
+              this.waitForBackground(runId, a, session);
+            } else {
+              this.stopWaitingForBackground(a);
+              await this.turnSucceeded(runId, a);
+            }
           } else if (ev.subtype === "error_max_budget_usd" && this.mustGet(runId).kind === "scout") {
             this.finishScout(runId, `stopped at its budget; ${this.scoutTally(a)}`);
           } else {
             this.closeSession(a);
             this.fail(runId, new Error(`agent ended with "${ev.subtype}"${ev.errors?.length ? `: ${ev.errors.join("; ")}` : ""}`));
           }
+          break;
+        }
+        case "agent.background": {
+          a.background = ev.running;
+          hub.emit(runId, ev.kind, { ...ev });
+          // Finished, but the agent may not continue: don't wait forever for a turn that won't come.
+          if (ev.running === 0 && a.awaitingBackground) this.armBackgroundTimer(runId, a, session, this.deps.backgroundGraceMs ?? 60_000, "its background tasks finished but it didn't continue");
           break;
         }
         case "agent.exit": {
@@ -811,6 +840,40 @@ export class RunManager {
         }
       }
     }
+  }
+
+  /** What follows a successful turn: a scout finishes (nothing lands); a worker's work is checked. */
+  private async turnSucceeded(runId: number, a: Active) {
+    if (this.mustGet(runId).kind === "scout") this.finishScout(runId, this.scoutTally(a));
+    else await this.verify(runId);
+  }
+
+  private waitForBackground(runId: number, a: Active, session: AgentSession) {
+    if (a.awaitingBackground) return;
+    a.awaitingBackground = true;
+    this.deps.hub.emit(runId, "system.log", {
+      msg: `The agent's turn ended with ${a.background} background task(s) still running; waiting for them before checking the work.`,
+    });
+    this.armBackgroundTimer(runId, a, session, this.deps.backgroundMaxWaitMs ?? 30 * 60_000, "its background tasks were still running");
+  }
+
+  private armBackgroundTimer(runId: number, a: Active, session: AgentSession, ms: number, why: string) {
+    if (a.backgroundTimer) clearTimeout(a.backgroundTimer);
+    a.backgroundTimer = setTimeout(() => {
+      a.backgroundTimer = null;
+      // Stale if the session was replaced, the wait already ended, or the run moved on.
+      if (this.active.get(runId) !== a || a.session !== session || !a.awaitingBackground) return;
+      if (this.mustGet(runId).state !== "running") return;
+      a.awaitingBackground = false;
+      this.deps.hub.emit(runId, "system.log", { level: "warn", msg: `Checking the work anyway: ${why}.` });
+      this.turnSucceeded(runId, a).catch((e) => this.fail(runId, e));
+    }, ms);
+  }
+
+  private stopWaitingForBackground(a: Active) {
+    a.awaitingBackground = false;
+    if (a.backgroundTimer) clearTimeout(a.backgroundTimer);
+    a.backgroundTimer = null;
   }
 
   /** Count an observed running total for the live session; returns what it added. */
@@ -865,6 +928,7 @@ export class RunManager {
   }
 
   private closeSession(a: Active) {
+    this.stopWaitingForBackground(a);
     if (!a.session) return;
     a.intent = "close";
     a.session.close();
