@@ -93,6 +93,7 @@ interface Active {
   gapCount: number;
   librarianCount: number;
   contractRequests: number;
+  workRequests: number;
   /** Scout runs: setup and check results on trunk, what it filed, and whether its budget stopped it. */
   trunkResults?: string;
   scoutTickets: number;
@@ -152,6 +153,7 @@ const MAX_NOTICED_PER_RUN = 10;
 const MAX_GAPS_PER_RUN = 5;
 const MAX_LIBRARIAN_PER_RUN = 8;
 const MAX_CONTRACT_REQUESTS_PER_RUN = 3;
+const MAX_WORK_REQUESTS_PER_RUN = 3;
 const LIBRARIAN_TIMEOUT_MS = 120_000;
 
 /**
@@ -393,6 +395,7 @@ export class RunManager {
       gapCount: 0,
       librarianCount: 0,
       contractRequests: 0,
+      workRequests: 0,
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -687,6 +690,7 @@ export class RunManager {
       gapCount: 0,
       librarianCount: 0,
       contractRequests: 0,
+      workRequests: 0,
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -1118,6 +1122,7 @@ export class RunManager {
     const wf = this.active.get(runId)?.workflow;
     if (wf?.library) tools.push(...this.libraryTools(runId, a));
     tools.push(this.noticedTool(runId, a));
+    tools.push(this.workRequestTool(runId, a));
     if (wf && Object.keys(wf.contracts).length) tools.push(this.contractRequestTool(runId, a));
     tools.push(...this.previewTools(runId, a));
     return tools;
@@ -1437,6 +1442,62 @@ export class RunManager {
         this.deps.hub.ticket(t);
         this.deps.hub.emit(runId, "contract.request", { contract: name, decision: d.id, ticket: t.id, change });
         return { text: `Requested as decision #${d.id}, with ticket #${t.id} waiting on it. Keep working against the current contract.` };
+      },
+    };
+  }
+
+  /**
+   * A need between areas: work this ticket depends on that belongs elsewhere (another package, a
+   * missing endpoint, a fix someone else owns). It becomes a proposed ticket for the operator, never
+   * a todo one, and the requesting run is flagged so its reviewer knows something is still missing.
+   */
+  private workRequestTool(runId: number, a: () => Active): AcutisTool {
+    return {
+      name: "request_work",
+      description:
+        "Ask for work your ticket depends on but that belongs outside it (another package or area, a missing API, a fix someone else should make), instead of doing it here. " +
+        "It becomes a proposed ticket for the operator. Carry on with what you can, and say in your final summary what is left until it's done.",
+      params: {
+        title: { type: "string", description: "One line naming the work, e.g. \"engine: export getLegalMovesFor(tile)\"." },
+        need: { type: "string", description: "What is needed, concretely, and where (files, packages, interfaces)." },
+        why: { type: "string", description: "What your ticket can't do without it, and what you did meanwhile (a stub, a skipped case)." },
+      },
+      handler: async (args): Promise<ToolOutput> => {
+        const x = a();
+        const title = clip(String(args.title ?? "").replace(/\s+/g, " "), 200);
+        const need = clip(args.need, 3000);
+        if (!title || !need) return { text: "title and need are required", isError: true };
+        const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        // Two workers needing the same thing share one ticket.
+        const known = this.deps.tickets
+          .list({ repo: x.repo.name })
+          .find((t) => t.source === "work-request" && !["done", "cancelled"].includes(t.status) && norm(t.title) === norm(title));
+        if (known) {
+          this.deps.hub.emit(runId, "work.request", { ticket: known.id, title: known.title, status: known.status, existing: true });
+          return { text: `Already requested as ticket #${known.id} (${known.status}). Carry on, and say in your summary what waits on it.` };
+        }
+        if (x.workRequests >= MAX_WORK_REQUESTS_PER_RUN) {
+          return { text: `This run already made ${MAX_WORK_REQUESTS_PER_RUN} work requests; list anything else in your final summary.`, isError: true };
+        }
+        x.workRequests++;
+        const t = this.deps.tickets.create({
+          repo: x.repo.name,
+          title,
+          body: [
+            `Requested by the worker of run ${runId}: ticket #${x.ticket.id} (${x.ticket.title}) waits on it. Worker-written: check it before acting.`,
+            "",
+            need,
+            "",
+            "**Why:** " + clip(args.why, 3000),
+          ].join("\n"),
+          source: "work-request",
+          status: "proposed",
+        });
+        this.deps.hub.ticket(t);
+        this.deps.hub.emit(runId, "work.request", { ticket: t.id, title, status: t.status });
+        return {
+          text: `Filed as proposed ticket #${t.id} for the operator. Don't do that work here: carry on with your ticket, and say in your final summary what is unfinished until #${t.id} lands.`,
+        };
       },
     };
   }

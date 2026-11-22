@@ -87,7 +87,12 @@ queue and start as others finish, pause or reach review.
 Scouts look through a repo in one area (`acutis scout <repo> infrastructure|tests`, or Run in the
 dashboard's Scouts panel) and file tickets and questions; they land nothing. Questions only you can
 answer go to the Decisions panel (`acutis decisions`), ranked by how much work waits on them. Your
-answer becomes a decision every later worker and scout follows.
+answer becomes a decision every later worker and scout follows. Workers that need work outside
+their ticket (`request_work`) file it as a proposed ticket for you to accept or reject.
+
+Notifications go to `notify-send` if it's installed (`ACUTIS_NOTIFY=off` to disable) and/or a
+webhook such as an ntfy.sh topic (`ACUTIS_NOTIFY_URL`). Permission requests and reviews are sent at
+once; questions and proposed tickets are batched into one notification per burst.
 
 Everything the dashboard does is also on the CLI (`bun src/cli.ts` lists it), e.g.:
 
