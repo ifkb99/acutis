@@ -245,12 +245,15 @@ There are two separate questions: where the agent loop runs, and where the app r
 - **Opt-in, in trunk's workflow**: `scouts: { <type>: { triggers: [globs] }, trigger_debounce_min,
   trigger_daily_cap }` (defaults 10 minutes and 3 runs per repo per day). Nothing is triggered
   unless a scout lists triggers.
-- **Detection from commits.** Acutis keeps the last trunk commit it has dealt with per repo
-  (`trunk_seen`). A check compares it with trunk now and asks jj which watched paths changed in
+- **Detection from commits.** Acutis keeps, per repo and triggered scout, the last trunk commit it
+  has dealt with (`trunk_seen`), so one busy scout doesn't hold back another. A check compares it with trunk now and asks jj which watched paths changed in
   between, under the *current* trunk's policy. The first check only records. Checks run after
-  every `land: trunk` landing and every 5 minutes in the daemon (`ACUTIS_TRUNK_CHECK_S`); each
-  starts with `jj git import --ignore-working-copy`, so a pull or merge done with git in a
-  colocated repo counts. Nothing is ever fetched: a merge on GitHub counts once it's pulled.
+  every `land: trunk` landing and every 5 minutes in the daemon (`ACUTIS_TRUNK_CHECK_S`, at least
+  30). Only repos whose trunk declares triggers are touched: for them a check starts with
+  `jj git import --ignore-working-copy`, so a pull or merge done with git in a colocated repo
+  counts (and, as with any jj command there, a deleted git branch is dropped from jj). Nothing is
+  ever fetched: a merge on GitHub counts once it's pulled. If the last-seen commit is gone, the
+  scout starts again from trunk.
 - **Debounce.** The first change schedules a wake after the debounce; later changes in that window
   join it, and the wake looks at everything from the last-seen commit to trunk then. The last-seen
   commit advances only when the change has been dealt with (woken, capped, or nothing watched it),
@@ -258,7 +261,7 @@ There are two separate questions: where the agent loop runs, and where the app r
 - **Limits.** Over the daily cap, the change is noted (and logged) without a run. If the scout is
   already running, the change stays unseen and wakes it again once it's free. A woken scout uses
   its normal budget, is marked `woken_by` (with the commits and paths), and its brief starts with
-  the changed paths as data. Its tickets and questions reach the operator through the batched
+  the changed paths and their diff (capped at 6000 characters) as data. Its tickets and questions reach the operator through the batched
   notifications.
 
 ### Lessons (2026-11-22, phase 5 of the scouts plan)
@@ -272,14 +275,15 @@ There are two separate questions: where the agent loop runs, and where the app r
   again.
 - **Sources.** `propose_lesson` for workers and scouts (three per run). And the push source: after a
   worker run reaches review, a cheap model (the library model) reads its final report plus any
-  checks that failed on earlier attempts and proposes at most one lesson, or NONE. It runs after
+  checks that failed on earlier attempts and proposes at most one lesson, or NONE. Once per run (a
+  send-back that returns to review doesn't draft again), and only when the checks pass. It runs after
   review starts, capped at $0.03, with a timeout; it can't delay or fail the run, and its cost is
   added to the run. Across 19 real runs on disk none needed a retry, so drafting only after
   retries would almost never fire; the report is where agents mention workarounds.
 - **Only approved text reaches a prompt**, in its own section after the operator decisions. All
   approved lessons go in if they fit `budget_chars` (default 1500); otherwise the cheap model picks
   among the 40 best keyword matches (ids it invents are dropped), falling back to keywords on any
-  error or timeout. Selection happens once, at the run's start, and is stored in a
+  error, timeout or reply without valid ids (only an explicit NONE means "none of them"). Selection happens once, at the run's start, and is stored in a
   `lessons.given` event: resumed sessions and send-backs reuse that exact text, so the system
   prompt never changes mid-run (and later edits don't reach a run already going).
 - **Operator.** Dashboard Lessons panel (approve with an edit box, reject, retire), `acutis lessons`

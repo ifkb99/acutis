@@ -163,6 +163,12 @@ describe("lessons in runs", () => {
     expect(systems[0]).toContain("Web UI snapshots");
     expect(systems[0]).not.toContain("harness tests need");
 
+    const garbled = new FakeOneShot({ pick: () => "I think the second and fourth ones." });
+    const g = await setup([sees], { oneShot: garbled, lessons: lessonsWf });
+    texts.forEach((t) => g.app.runs.addLesson("demo", t));
+    const rg = await g.run("Harness tests fail", "the harness can't find the engine build");
+    expect((g.app.store.events(rg.id).find((e) => e.kind === "lessons.given")!.data as any).by).toBe("keywords");
+
     const failing = new FakeOneShot({ pick: () => new Error("overloaded") });
     const b = await setup([sees], { oneShot: failing, lessons: lessonsWf });
     texts.forEach((t) => b.app.runs.addLesson("demo", t));
@@ -194,6 +200,34 @@ describe("lessons in runs", () => {
     expect(l).toMatchObject({ status: "proposed", source: "draft", run_id: r.id, text: "Build packages/engine before running the harness tests." });
     expect(app.store.getRun(r.id)!.state).toBe("awaiting_review");
   });
+
+  test("drafted once per run (a send-back returning to review doesn't draft again), and not while checks still fail", async () => {
+    const drafter = new FakeOneShot({ draft: () => "NONE" });
+    const resumed: FakeScript = async (c) => {
+      c.result("success", 0.02, "Addressed the note; same report again, long enough to be worth reading for a lesson.");
+      await c.nextMessage();
+    };
+    const a = await setup([works(), resumed], { oneShot: drafter });
+    const r = await a.run("t");
+    await a.app.runs.message(r.id, "one more thing");
+    await waitFor(() => a.app.store.events(r.id).filter((e) => e.kind === "agent.result").length === 2, 10000);
+    await waitFor(() => a.app.store.getRun(r.id)!.state === "awaiting_review", 10000);
+    await a.app.runs.lessonDraftsIdle();
+    expect(drafter.calls.filter((c) => c.system === DRAFT_SYSTEM).length).toBe(1);
+
+    const failing = new FakeOneShot({ draft: () => "NONE" });
+    const stubborn: FakeScript = async (c) => {
+      writeFileSync(join(c.spec.cwd, "src/a.ts"), "export const a = 4;\n");
+      c.result("success", 0.01, "Tried once; a long enough report for the drafter to have something to read here.");
+      await c.nextMessage(); // the check failure
+      c.result("success", 0.02, "Tried again; the check still fails, and this report is long enough to read too.");
+      await c.nextMessage();
+    };
+    const b = await setup([stubborn], { oneShot: failing, gates: "gates:\n  - \"false\"\n" });
+    const rb = await b.run("t");
+    expect(b.app.store.getRun(rb.id)!.gates_ok).toBe(0);
+    expect(failing.calls).toEqual([]);
+  }, 30000);
 
   test("NONE, a failing model, or draft: false leave the run alone and propose nothing", async () => {
     const none = new FakeOneShot({ draft: () => "NONE" });

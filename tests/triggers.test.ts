@@ -42,12 +42,12 @@ describe("trunk triggers", () => {
     briefs.length = 0;
     const { app, commit, scoutRuns } = await setup([scout]);
     expect(await app.runs.checkTriggers("demo")).toEqual([]);
-    const first = app.store.getTrunkSeen("demo");
+    const first = app.store.getTrunkSeen("demo:infrastructure");
     expect(first).toBeTruthy();
 
     await commit("README.md", "# r\nmore\n");
     expect(await app.runs.checkTriggers("demo")).toEqual([]);
-    expect(app.store.getTrunkSeen("demo")).not.toBe(first); // dealt with: nothing watched it
+    expect(app.store.getTrunkSeen("demo:infrastructure")).not.toBe(first); // dealt with: nothing watched it
     expect(scoutRuns()).toEqual([]);
 
     await commit("package-lock.json", '{"lockfileVersion": 3}\n');
@@ -58,22 +58,23 @@ describe("trunk triggers", () => {
     await waitFor(() => app.store.getRun(run!.id)!.state === "done", 10000);
     expect(briefs[0]).toContain("You were woken because trunk changed paths this repo asks you to watch");
     expect(briefs[0]).toContain("- package-lock.json");
+    expect(briefs[0]).toContain('+{"lockfileVersion": 3}'); // the diff, as data
     expect(app.store.events(run!.id).some((e) => e.kind === "scout.triggered")).toBe(true);
     expect(await app.runs.checkTriggers("demo")).toEqual([]); // seen advanced
   });
 
   test("a burst of landings within the debounce wakes the scout once; nothing is marked seen until then", async () => {
     briefs.length = 0;
-    const { app, commit, scoutRuns } = await setup([scout, scout], { debounce: 0.01 }); // 600ms
+    const { app, commit, scoutRuns } = await setup([scout, scout], { debounce: 0.03 }); // 1.8s
     await app.runs.checkTriggers("demo");
-    const before = app.store.getTrunkSeen("demo");
+    const before = app.store.getTrunkSeen("demo:infrastructure");
     await commit("package-lock.json", "{1}\n");
     await app.runs.checkTriggers("demo");
     await commit(".github/workflows/ci.yml", "on: push\n");
     await app.runs.checkTriggers("demo");
-    expect(app.store.getTrunkSeen("demo")).toBe(before); // pending: a restart would find it again
+    expect(app.store.getTrunkSeen("demo:infrastructure")).toBe(before); // pending: a restart would find it again
     expect(scoutRuns()).toEqual([]);
-    await waitFor(() => scoutRuns().length > 0, 5000);
+    await waitFor(() => scoutRuns().length > 0, 8000);
     await Bun.sleep(800);
     expect(scoutRuns().length).toBe(1);
     await waitFor(() => briefs.length > 0, 10000);
@@ -130,6 +131,51 @@ describe("trunk triggers", () => {
     await $`git -c user.name=t -c user.email=t@example.invalid commit -qam ${"bump lock via git"}`.cwd(repoPath).quiet();
     expect(await app.runs.checkTriggers("demo")).toMatchObject([{ scout: "infrastructure", outcome: "started", paths: ["package-lock.json"] }]);
     expect(scoutRuns().length).toBe(1);
+  });
+
+  test("a repo whose trunk declares no triggers is left alone: no git import, nothing recorded", async () => {
+    const repoPath = await makeRepo({ "package-lock.json": "{}\n", ".acutis/workflow.md": "---\nland: trunk\n---\n" });
+    const app = createApp({ home: tempDir("acutis-home-"), port: 0 }, { runner: new FakeRunner([]) });
+    app.store.addRepo({ name: "plain", path: repoPath, base: "main" });
+    let imported = 0;
+    const ws = (app.runs as any).deps.workspaces;
+    const orig = ws.refresh.bind(ws);
+    ws.refresh = async (r: unknown) => (imported++, orig(r));
+    expect(await app.runs.checkTriggers("plain")).toEqual([]);
+    expect(imported).toBe(0);
+    expect(app.store.getTrunkSeen("plain:infrastructure")).toBeNull();
+  });
+
+  test("one scout busy doesn't hold back another scout's trigger", async () => {
+    let release!: () => void;
+    const held: FakeScript = async (c) => {
+      await new Promise<void>((r) => (release = r));
+      c.result();
+      await c.nextMessage();
+    };
+    const repoPath = await makeRepo({
+      "package-lock.json": "{}\n",
+      "src/auth.ts": "export {};\n",
+      ".acutis/workflow.md":
+        '---\nland: trunk\nscouts:\n  trigger_debounce_min: 0\n  infrastructure:\n    triggers: ["package-lock.json"]\n  security:\n    triggers: ["src/auth.ts"]\n---\n',
+    });
+    const app = createApp({ home: tempDir("acutis-home-"), port: 0 }, { runner: new FakeRunner([held, scout, scout]) });
+    app.store.addRepo({ name: "two", path: repoPath, base: "main" });
+    const commit = async (file: string, text: string) => {
+      await Bun.write(join(repoPath, file), text);
+      await $`jj commit -m ${file} && jj bookmark set main -r @-`.cwd(repoPath).quiet();
+    };
+    await app.runs.checkTriggers("two");
+    const r1 = await app.runs.startScout("two", "infrastructure");
+    await waitFor(() => app.store.getRun(r1.id)!.state === "running", 10000);
+    await commit("package-lock.json", "{6}\n");
+    await commit("src/auth.ts", "export const x = 1;\n");
+    const out = await app.runs.checkTriggers("two");
+    expect(out.map((o) => [o.scout, o.outcome]).sort()).toEqual([["infrastructure", "busy"], ["security", "started"]]);
+    release();
+    await waitFor(() => app.store.getRun(r1.id)!.state === "done", 10000);
+    // Security dealt with; only the busy infrastructure change wakes again.
+    expect((await app.runs.checkTriggers("two")).map((o) => [o.scout, o.outcome])).toEqual([["infrastructure", "started"]]);
   });
 
   test("a trunk landing that touches a watched path wakes the scout", async () => {
