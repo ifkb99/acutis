@@ -3,7 +3,16 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { Store } from "./db";
 import type { Hub } from "./hub";
 import { workerEnv } from "./env";
-import { Library, formatHits, type LibraryConfig, type RunSummary } from "./library";
+import {
+  DESCRIBE_SYSTEM,
+  LIBRARIAN_SYSTEM,
+  Library,
+  THIN_SECTION_CHARS,
+  descriptionKey,
+  formatHits,
+  type LibraryConfig,
+  type RunSummary,
+} from "./library";
 import { PreviewManager } from "./preview";
 import {
   DEFAULT_SCOUT_BUDGET_USD,
@@ -31,6 +40,7 @@ import type {
   LibraryGap,
   Noticed,
   NoticedKind,
+  OneShotModel,
   PermissionDecision,
   PermissionRequest,
   Repo,
@@ -134,6 +144,19 @@ function redactInput(input: unknown): unknown {
 }
 const MAX_NOTICED_PER_RUN = 10;
 const MAX_GAPS_PER_RUN = 5;
+
+/** The first JSON object in a model's reply (it may wrap it in a code fence). */
+function parseJsonObject(text: string): Record<string, unknown> | null {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const v = JSON.parse(text.slice(start, end + 1));
+    return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
 /** Agent-written text that Acutis stores or passes on: trimmed, capped, and with credentials redacted. */
 const clip = (s: unknown, n: number) => redactSecrets(String(s ?? "")).trim().slice(0, n);
 
@@ -168,11 +191,17 @@ export class RunManager {
       maxRuns?: number;
       /** Minimum gap between live cost polls of one session. */
       costPollMs?: number;
+      /** A cheap model for describing docs and the librarian; absent, both are off. */
+      oneShot?: OneShotModel;
+      /** The model the one-shot calls use (part of the description cache key). */
+      libraryModel?: string;
     },
   ) {
     this.browser = deps.browser ?? unavailableBrowser;
     this.previews = new PreviewManager(deps.commandSandbox);
     this.library = new Library(deps.store.db);
+    // Decisions are written to the library only when they change; reseed them (the library may have been rebuilt).
+    for (const r of deps.store.listRepos()) this.refreshDecisionsLibrary(r.name);
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -195,6 +224,7 @@ export class RunManager {
 
   /** Stop everything this manager started (daemon shutdown). */
   shutdown() {
+    this.describeStop = true;
     this.previews.stopAll();
     for (const a of this.active.values()) {
       if (a.gate) killGroup(a.gate);
@@ -379,6 +409,124 @@ export class RunManager {
    * (still exactly that commit). Never fails the run: the library is a help, not a requirement.
    */
   private async indexLibrary(runId: number, repo: Repo, ws: Workspace, workflow: Workflow) {
+    if (!workflow.library) return;
+    await this.indexLibraryOnce(runId, repo, ws, workflow);
+    if (workflow.library.describe && this.library.isIndexed(repo.name, ws.baseCommit)) {
+      this.scheduleDescribe(repo.name, ws.baseCommit, workflow.library.describe_budget_usd);
+    }
+  }
+
+  // ------------------------------------------------------------------ describing (phase 1b, reshaped)
+
+  private describeQueue: Promise<void> = Promise.resolve();
+  private describing = new Set<string>();
+  private describeStop = false;
+
+  /** Queue describing a commit's docs; one job at a time, in the background, never blocking a run. */
+  private scheduleDescribe(repo: string, commit: string, budget: number) {
+    if (!this.deps.oneShot) return;
+    const key = `${repo}@${commit}`;
+    const job = this.library.describeJob(repo, commit);
+    if (this.describing.has(key) || (job && job.status === "done")) return;
+    this.describing.add(key);
+    this.describeQueue = this.describeQueue
+      .then(() => this.describeCommit(repo, commit, budget))
+      .catch((e) => this.library.setDescribeJob(repo, commit, { status: "failed", cost_usd: 0, described: 0, cached: 0, thin: 0, note: (e as Error).message }))
+      .finally(() => this.describing.delete(key));
+  }
+
+  /** Wait for describing to finish (tests; the A/B waits so its runs search with descriptions). */
+  async describeIdle(): Promise<void> {
+    await this.describeQueue;
+  }
+
+  /**
+   * Describe a commit's doc sections, one call per file (a hostile section can only steer its own
+   * file's descriptions), reusing cached descriptions by content, skipping thin sections. A file's
+   * description is written from its raw sections in the same call, never from section descriptions.
+   */
+  private async describeCommit(repo: string, commit: string, budget: number) {
+    const model = this.deps.libraryModel ?? "claude-haiku-5-5";
+    const tally = { status: "running", cost_usd: 0, described: 0, cached: 0, thin: 0, note: "" };
+    this.library.setDescribeJob(repo, commit, tally);
+    const MAX_BATCH_CHARS = 60_000;
+    for (const f of this.library.filesToDescribe(repo, commit)) {
+      if (this.describeStop) {
+        tally.note = "stopped (daemon shutting down)";
+        break;
+      }
+      if (tally.cost_usd >= budget) {
+        tally.note = `stopped at the budget ($${budget.toFixed(2)})`;
+        break;
+      }
+      const raw = f.sections.map((s) => `${s.heading ? `## ${s.heading}\n` : ""}${s.body}`).join("\n\n");
+      const fileKey = descriptionKey(model, "file", `${f.ref}\0${raw}`);
+      const cachedFile = this.library.cachedDescription(fileKey);
+      if (cachedFile !== null) this.library.setFileDescription(repo, commit, f.ref, cachedFile);
+      const pending: { rowid: number; heading: string; body: string; key: string }[] = [];
+      for (const sec of f.sections) {
+        if (sec.body.length < THIN_SECTION_CHARS) {
+          tally.thin++;
+          continue;
+        }
+        const key = descriptionKey(model, "section", `${sec.heading}\0${sec.body}`);
+        const hit = this.library.cachedDescription(key);
+        if (hit !== null) {
+          this.library.setNav(sec.rowid, hit);
+          tally.cached++;
+        } else pending.push({ ...sec, key });
+      }
+      // A file with nothing but thin sections needs no description either: its headings say enough.
+      if (!pending.length && (cachedFile !== null || f.sections.every((sec) => sec.body.length < THIN_SECTION_CHARS))) continue;
+      // Batches within this file only; the first one also asks for the file's description.
+      const batches: (typeof pending)[] = [[]];
+      let size = 0;
+      for (const p of pending) {
+        if (size + p.body.length > MAX_BATCH_CHARS && batches.at(-1)!.length) {
+          batches.push([]);
+          size = 0;
+        }
+        batches.at(-1)!.push(p);
+        size += p.body.length;
+      }
+      for (const [i, batch] of batches.entries()) {
+        const wantFile = i === 0 && cachedFile === null;
+        if (!batch.length && !wantFile) continue;
+        const esc = (t: string) => t.replace(/<\/(section|file)>/gi, "<\\/$1>");
+        const prompt = [
+          `File: ${f.ref}`,
+          ...(wantFile ? [`<file path="${f.ref}">`, esc(raw.slice(0, MAX_BATCH_CHARS)), raw.length > MAX_BATCH_CHARS ? "[file continues]" : "", "</file>"] : []),
+          ...batch.map((p) => `<section id="s${p.rowid}" heading="${p.heading.replace(/"/g, "'")}">\n${esc(p.body)}\n</section>`),
+          "",
+          `Return JSON with ${wantFile ? '"file": two or three lines on the whole file, and ' : ""}one key per section id (${batch.map((p) => `"s${p.rowid}"`).join(", ") || "none"}).`,
+        ].join("\n");
+        const r = await this.deps.oneShot!.ask({ system: DESCRIBE_SYSTEM, prompt, maxTurns: 1, maxBudgetUsd: Math.max(0.01, Math.min(0.1, budget - tally.cost_usd)), model });
+        tally.cost_usd += r.costUsd;
+        const out = parseJsonObject(r.text);
+        if (!out) {
+          tally.note = `a reply for ${f.ref} wasn't JSON${r.error ? ` (${r.error})` : ""}`;
+          continue;
+        }
+        for (const p of batch) {
+          const d = typeof out[`s${p.rowid}`] === "string" ? clip(out[`s${p.rowid}`], 300) : "";
+          if (!d) continue;
+          this.library.setNav(p.rowid, d);
+          this.library.cacheDescription(p.key, d);
+          tally.described++;
+        }
+        if (wantFile && typeof out.file === "string" && out.file.trim()) {
+          const d = clip(out.file, 400);
+          this.library.setFileDescription(repo, commit, f.ref, d);
+          this.library.cacheDescription(fileKey, d);
+        }
+        this.library.setDescribeJob(repo, commit, tally);
+      }
+    }
+    tally.status = tally.note.startsWith("stopped") ? "partial" : "done";
+    this.library.setDescribeJob(repo, commit, tally);
+  }
+
+  private async indexLibraryOnce(runId: number, repo: Repo, ws: Workspace, workflow: Workflow) {
     if (!workflow.library || this.library.isIndexed(repo.name, ws.baseCommit)) return;
     const key = `${repo.name}@${ws.baseCommit}`;
     let job = this.libraryIndexing.get(key);
@@ -879,8 +1027,9 @@ export class RunManager {
     return tools;
   }
 
-  private libraryTools(runId: number, a: () => Active): AcutisTool[] {
-    return [
+  private libraryTools(runId: number, a: () => Active, by: "worker" | "librarian" = "worker"): AcutisTool[] {
+    const docsCommit = (x: Active) => (this.library.isIndexed(x.repo.name, x.ws.baseCommit) ? x.ws.baseCommit : this.library.latestCommit(x.repo.name));
+    const tools: AcutisTool[] = [
       {
         name: "search_project",
         description:
@@ -914,7 +1063,7 @@ export class RunManager {
               )
             : `No library results for "${query}"${note}. Try other words, or search the code with Grep. If the docs should explain this and don't, say so with report_library_gap.`;
           // Receipt: what this run was shown (the A/B compares these; reads outside the tools aren't counted here).
-          this.deps.hub.emit(runId, "library.search", { query, ids: hits.map((h) => h.id), chars: text.length });
+          this.deps.hub.emit(runId, "library.search", { query, ids: hits.map((h) => h.id), chars: text.length, by });
           return { text };
         },
       },
@@ -933,7 +1082,7 @@ export class RunManager {
                 ? `${e.ref} [approved: the operator's decision]`
                 : `${e.ref} [reviewed: landed run, written by its worker]`;
           const text = `[${String(args.id).trim()}] ${where}${e.heading ? ` · ${e.heading}` : ""}\n\n${clip(e.body, 4000)}`;
-          this.deps.hub.emit(runId, "library.read", { id: String(args.id).trim(), chars: text.length });
+          this.deps.hub.emit(runId, "library.read", { id: String(args.id).trim(), chars: text.length, by });
           return { text };
         },
       },
@@ -961,7 +1110,86 @@ export class RunManager {
           return { text: merged ? `Counted against gap #${gap.id} (${gap.count} reports).` : `Recorded as gap #${gap.id}.` };
         },
       },
+      {
+        name: "project_overview",
+        description:
+          "A table of contents of the project's docs (as of trunk): each doc file with its main headings, and a short description where one exists. " +
+          "Pass a path prefix (e.g. \"docs/\") to narrow it.",
+        params: { path_prefix: { type: "string", description: "Only files under this path.", optional: true } },
+        handler: async (args): Promise<ToolOutput> => {
+          const x = a();
+          const commit = docsCommit(x);
+          if (!commit) return { text: "No docs are indexed for this repo." };
+          const body = this.library.overview(x.repo.name, commit, clip(args.path_prefix, 200));
+          const text = `Docs as of ${commit.slice(0, 12)}${commit !== x.ws.baseCommit ? " (not your base; may differ)" : ""}. "about:" lines are model-written descriptions; check the text.\n\n${body || "(no doc files)"}`;
+          this.deps.hub.emit(runId, "library.overview", { prefix: clip(args.path_prefix, 200), chars: text.length, by });
+          return { text };
+        },
+      },
     ];
+    // The librarian itself only searches and reads; it can't report gaps or call itself.
+    if (by === "librarian") return tools.filter((t) => t.name !== "report_library_gap");
+    const wf = this.active.get(runId)?.workflow;
+    if (wf && wf.library && wf.library.librarian && this.deps.oneShot) tools.push(this.librarianTool(runId, a));
+    return tools;
+  }
+
+  /**
+   * ask_librarian: a cheap model answers one question from the docs, synchronously, with only the
+   * library tools. Its reading stays out of the worker's context. Acutis checks each [SRC: …]
+   * citation against the entries the librarian actually opened, and adds its cost to the run.
+   */
+  private librarianTool(runId: number, a: () => Active): AcutisTool {
+    return {
+      name: "ask_librarian",
+      description:
+        "Ask the project librarian a broad question about this repo's docs (\"how are mods loaded?\", \"what's the release process?\"). " +
+        "A cheaper model reads the docs for you and answers in a few hundred words, marking each claim [SRC: path:line], [INF] inferred, [GEN] general knowledge or ❓ unknown. " +
+        "Check [SRC] claims you rely on; treat the rest as hints.",
+      params: { question: { type: "string", description: "One question." } },
+      handler: async (args): Promise<ToolOutput> => {
+        const x = a();
+        const question = clip(args.question, 500);
+        if (!question) return { text: "question is empty", isError: true };
+        // What the librarian was shown, from its tool outputs' "[L12] path:line [tier…]" lines.
+        const shown = new Set<string>();
+        const record = (t: string) => {
+          for (const m of t.matchAll(/^\[L\d+\] (.+?)(?::\d+)? \[(?:approved|reviewed)/gm)) shown.add(m[1]!);
+        };
+        const tools = this.libraryTools(runId, a, "librarian").map((t) => ({
+          ...t,
+          handler: async (args2: Record<string, string | number | undefined>) => {
+            const out = await t.handler(args2);
+            record(out.text);
+            return out;
+          },
+        }));
+        const r = await this.deps.oneShot!.ask({ system: LIBRARIAN_SYSTEM(x.repo.name), prompt: question, tools, maxTurns: 10, maxBudgetUsd: 0.15, model: this.deps.libraryModel });
+        this.addRunCost(runId, r.costUsd);
+        if (r.error && !r.text) {
+          this.deps.hub.emit(runId, "library.librarian", { question, error: r.error, cost_usd: r.costUsd });
+          return { text: `The librarian couldn't answer (${r.error}). Search the docs yourself with search_project.`, isError: true };
+        }
+        const cited = [...r.text.matchAll(/\[SRC:\s*([^\]]+?)\]/g)].map((m) => m[1]!.trim());
+        const unverified = cited.filter((c) => {
+          const ref = c.replace(/:\d+(?:-\d+)?$/, "").trim();
+          return !shown.has(ref);
+        });
+        const answer = clip(r.text, 4000);
+        const note = unverified.length
+          ? `\n\n(Acutis: ${unverified.length} [SRC] citation(s) point at entries the librarian didn't open: ${[...new Set(unverified)].slice(0, 5).join("; ")}. Treat those claims as unsourced.)`
+          : "";
+        this.deps.hub.emit(runId, "library.librarian", { question, chars: answer.length + note.length, cost_usd: r.costUsd, cited: cited.length, unverified: unverified.length });
+        return { text: `${answer}${note}` };
+      },
+    };
+  }
+
+  /** Spend that happened outside the agent's own session (the librarian), counted on the run. */
+  private addRunCost(runId: number, usd: number) {
+    if (!(usd > 0)) return;
+    const run = this.deps.store.getRun(runId);
+    if (run) this.deps.hub.run(this.deps.store.updateRun(runId, { cost_usd: run.cost_usd + usd }));
   }
 
   private noticedTool(runId: number, a: () => Active): AcutisTool {

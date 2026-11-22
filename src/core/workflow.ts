@@ -79,7 +79,7 @@ export function defaultWorkflow(): Workflow {
     land: "bookmark",
     template: DEFAULT_TEMPLATE,
     source: "(default)",
-    library: { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE] },
+    library: { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE], describe: false, describe_budget_usd: 0.5, librarian: false },
     scouts: { auto_tickets: "high", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {} },
   };
 }
@@ -175,13 +175,20 @@ function parseScouts(v: unknown): Workflow["scouts"] {
 /** `library: false`, or `library: { include: [globs], exclude: [globs] }` (each replaces its default). */
 function parseLibrary(v: unknown): Workflow["library"] {
   if (v === false) return false;
-  const defaults = { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE] };
+  const defaults = { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE], describe: false, describe_budget_usd: 0.5, librarian: false };
   if (v === undefined || v === null || v === true) return defaults;
-  if (typeof v !== "object" || Array.isArray(v)) throw new Error('workflow: "library" must be false or { include, exclude }');
+  if (typeof v !== "object" || Array.isArray(v)) throw new Error('workflow: "library" must be false or a map');
   const l = v as Record<string, unknown>;
+  const bool = (k: string) => {
+    if (l[k] !== undefined && typeof l[k] !== "boolean") throw new Error(`workflow: "library.${k}" must be true or false`);
+    return l[k] === true;
+  };
   return {
     include: l.include === undefined ? defaults.include : asStringArray(l.include, "library.include"),
     exclude: l.exclude === undefined ? defaults.exclude : asStringArray(l.exclude, "library.exclude"),
+    describe: bool("describe"),
+    describe_budget_usd: typeof l.describe_budget_usd === "number" && l.describe_budget_usd > 0 ? l.describe_budget_usd : defaults.describe_budget_usd,
+    librarian: bool("librarian"),
   };
 }
 
@@ -286,7 +293,11 @@ Run them yourself first where you can.${
     opts.workflow.library
       ? `
 
-Project knowledge: \`mcp__acutis__search_project\` searches this repo's docs (as of trunk) and summaries of earlier landed runs, returning short excerpts with path:line. Use it before reading many files to find where something is explained; open a result with \`mcp__acutis__read_project_entry\`.`
+Project knowledge: \`mcp__acutis__search_project\` searches this repo's docs (as of trunk) and summaries of earlier landed runs, returning short excerpts with path:line. Use it before reading many files to find where something is explained; open a result with \`mcp__acutis__read_project_entry\`, and see what docs exist with \`mcp__acutis__project_overview\`.${
+          opts.workflow.library.librarian
+            ? " For a broad question about how the project works, \`mcp__acutis__ask_librarian\` has a cheaper model read the docs and answer with citations, which keeps that reading out of your context."
+            : ""
+        } If the docs should explain something and don't, record it with \`mcp__acutis__report_library_gap\`.`
       : ""
   }
 

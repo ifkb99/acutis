@@ -3,8 +3,8 @@ import { Store } from "./core/db";
 import { Hub } from "./core/hub";
 import { RunManager } from "./core/runs";
 import { ensureToken, tokenPath } from "./core/token";
-import type { AgentRunner, BrowserProvider, CommandSandbox } from "./core/types";
-import { ClaudeSdkRunner, probeSandbox } from "./providers/agent/claude-sdk";
+import type { AgentRunner, BrowserProvider, CommandSandbox, OneShotModel } from "./core/types";
+import { ClaudeSdkOneShot, ClaudeSdkRunner, probeSandbox } from "./providers/agent/claude-sdk";
 import { ChromeBrowser } from "./providers/browser/chrome";
 import { BwrapSandbox } from "./providers/sandbox/bwrap";
 import { LocalTicketSource } from "./providers/tickets/local";
@@ -27,7 +27,7 @@ export function loadConfig(): Config {
 
 export function createApp(
   cfg: Config,
-  opts: { runner?: AgentRunner; browser?: BrowserProvider; commandSandbox?: CommandSandbox; costPollMs?: number } = {},
+  opts: { runner?: AgentRunner; browser?: BrowserProvider; commandSandbox?: CommandSandbox; costPollMs?: number; oneShot?: OneShotModel } = {},
 ) {
   const store = new Store(`${cfg.home}/acutis.db`);
   const hub = new Hub(store);
@@ -36,6 +36,7 @@ export function createApp(
   const sandboxStatus = opts.runner ? { ok: false, reason: "test runner" } : probeSandbox();
   const sandbox = sandboxStatus.ok;
   const token = ensureToken(cfg.home);
+  const libraryModel = process.env.ACUTIS_LIBRARY_MODEL || "claude-haiku-5-5";
   const runner = opts.runner ?? new ClaudeSdkRunner({ sandbox, denyRead: [tokenPath(cfg.home)] });
   const browser = opts.browser ?? new ChromeBrowser();
   // Gates and previews run worker-written code: confine them whenever the agent itself is sandboxed.
@@ -52,6 +53,9 @@ export function createApp(
     agentSandboxed: sandbox,
     maxRuns: cfg.maxRuns ?? 0,
     costPollMs: opts.costPollMs,
+    // Describing docs and the librarian use a cheap model; tests inject a fake (or none).
+    oneShot: opts.oneShot ?? (opts.runner ? undefined : new ClaudeSdkOneShot(libraryModel)),
+    libraryModel,
   });
   return { cfg, store, hub, tickets, workspaces, runner, runs, browser, sandbox, sandboxStatus, token };
 }

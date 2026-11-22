@@ -117,6 +117,12 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
       },
       "/api/tickets/:id/accept": { POST: api((req) => runs.acceptTicket(Number(req.params.id))) },
       "/api/tickets/:id/reject": { POST: api((req) => runs.rejectTicket(Number(req.params.id))) },
+      "/api/repos/:name/library": {
+        GET: api((req) => {
+          if (!store.getRepo(req.params.name!)) throw new RunError("not found", 404);
+          return runs.library.status(req.params.name!);
+        }),
+      },
       "/api/gaps": {
         GET: api((req) => {
           const q = new URL(req.url).searchParams;

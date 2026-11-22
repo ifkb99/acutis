@@ -228,6 +228,22 @@ export interface AgentRunner {
   start(spec: AgentSpec): AgentSession;
 }
 
+/**
+ * A short, synchronous call to a cheap model for Acutis's own work (describing docs, the
+ * librarian). The session has no built-in tools, no settings or MCP servers of its own, runs in
+ * an empty directory, and gets only the Acutis tools passed here: it reads untrusted repo text.
+ */
+export interface OneShotModel {
+  ask(opts: {
+    system: string;
+    prompt: string;
+    tools?: AcutisTool[];
+    maxTurns: number;
+    maxBudgetUsd: number;
+    model?: string;
+  }): Promise<{ text: string; costUsd: number; error?: string }>;
+}
+
 // ---- Browser ---------------------------------------------------------------
 
 export interface BrowserCheck {
@@ -321,7 +337,18 @@ export interface Workflow {
   /** Where the workflow came from, for display. */
   source: string;
   /** Which tracked files the project library indexes; false turns the library off for the repo. */
-  library: { include: string[]; exclude: string[] } | false;
+  library:
+    | {
+        include: string[];
+        exclude: string[];
+        /** Have a cheap model write descriptions of doc sections for search (off until the A/B says otherwise). */
+        describe: boolean;
+        /** Spend cap for describing one commit's docs, in USD. */
+        describe_budget_usd: number;
+        /** Offer workers and scouts ask_librarian (a cheap model that answers from the docs, with citations). */
+        librarian: boolean;
+      }
+    | false;
   /** Scouts the repo allows, with a focus and budget each; false turns scouts off. */
   scouts:
     | {

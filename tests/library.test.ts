@@ -39,6 +39,9 @@ describe("library units", () => {
     expect(parseWorkflow("---\nlibrary:\n  include: [\"wiki/**/*.md\"]\n---\n", "t").library).toEqual({
       include: ["wiki/**/*.md"],
       exclude: ["**/node_modules/**", "**/vendor/**", ".acutis/**"],
+      describe: false,
+      describe_budget_usd: 0.5,
+      librarian: false,
     });
     expect(() => parseWorkflow("---\nlibrary: [1]\n---\n", "t")).toThrow(/library/);
   });

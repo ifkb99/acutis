@@ -47,7 +47,7 @@ describe("scout runs", () => {
     expect(run.scout).toBe("infrastructure");
     await until(app, run.id, "done");
 
-    expect(toolNames).toEqual(["search_project", "read_project_entry", "report_library_gap", "list_work", "propose_ticket", "ask_decision", "update_decision", "withdraw_decision", "merge_decision"]);
+    expect(toolNames).toEqual(["search_project", "read_project_entry", "report_library_gap", "project_overview", "list_work", "propose_ticket", "ask_decision", "update_decision", "withdraw_decision", "merge_decision"]);
     expect(system).toContain("# Acutis scout: Infrastructure");
     // A failing setup step and check on trunk are findings handed to the scout, not run failures.
     expect(system).toContain("setup `exit 3`: FAILED (exit 3)");
