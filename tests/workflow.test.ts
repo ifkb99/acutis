@@ -45,6 +45,10 @@ test("the worker prompt explains the sandboxed shell's socket limit only when it
   const opts = { ticket, cwd: "/w", workflow: defaultWorkflow() };
   expect(workerSystemPrompt({ ...opts, sandboxed: true })).toContain("node --import tsx");
   expect(workerSystemPrompt({ ...opts, sandboxed: false })).not.toContain("Unix sockets");
+  // A preview whose start page isn't "/" (e.g. it carries a token) is named, so the worker opens it.
+  const withPreview = (path: string) => workerSystemPrompt({ ...opts, workflow: { ...opts.workflow, preview: { run: "bun dev", path, ready_timeout_s: 30 } } });
+  expect(withPreview("/#token=preview")).toContain("Its start page is `/#token=preview`");
+  expect(withPreview("/")).not.toContain("Its start page");
 });
 
 test("an acutis.db from before session_cost opens and gains the column", async () => {

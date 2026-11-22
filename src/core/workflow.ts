@@ -337,7 +337,9 @@ export function workerSystemPrompt(opts: {
   const preview = opts.workflow.preview
     ? `
 
-Seeing your work: Acutis runs this repo's preview server for you (\`${opts.workflow.preview.run}\`), so don't start one yourself.
+Seeing your work: Acutis runs this repo's preview server for you (\`${opts.workflow.preview.run}\`), so don't start one yourself.${
+        opts.workflow.preview.path !== "/" ? ` Its start page is \`${opts.workflow.preview.path}\`: open that path.` : ""
+      }
 - \`mcp__acutis__preview\` starts it if needed and returns its URL and recent logs.
 - \`mcp__acutis__browser\` opens a path of the preview in headless Chrome, runs optional steps (one per line: \`press ArrowLeft\`, \`click #selector\`, \`type text\`, \`wait 200\`, \`waitfor #selector\`) and an optional JS expression, then returns a screenshot, console output and page errors.
 Use them to check UI changes before you finish. Only the preview's own origin is reachable from that browser.`
