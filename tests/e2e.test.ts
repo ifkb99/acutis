@@ -6,8 +6,8 @@ import { FakeRunner, makeRepo, tempDir, waitFor, type FakeScript } from "./helpe
 
 /**
  * End to end against a live server with a scripted agent: the CLI's watch, and the dashboard's
- * Needs-you sidebar (permissions, noticed, decisions, proposed tickets), the run view's permission
- * card, notes editor, "Add note" and "Open preview", driven in real headless Chrome.
+ * Needs-you sidebar (permissions, noticed, decisions, proposed tickets), the Board petal's web, the
+ * run view's permission card, notes editor, "Add note" and "Open preview", driven in real headless Chrome.
  */
 const chrome = findChrome();
 const port = 18000 + Math.floor(Math.random() * 1000);
@@ -100,16 +100,16 @@ describe("end to end", () => {
       const r = await browser.check({
         url: `${dash}/#run-${runId}&token=${app.token}`,
         steps: [
-          // The run view opens first; notes live under the rose's New work petal.
+          // The run view opens first; notes live under the rose's New work petal, in its drawer.
           "waitfor .ev.text strong",
           "click .focus-bar .back",
           "click .petal.tint-pearl",
-          "waitfor .reponotes textarea",
+          "waitfor .drawer .reponotes textarea",
           "click .reponotes textarea",
           "type Prefer the Edit tool.",
           "click .reponotes .btn",
           "wait 300",
-          "click .wheel-wrap .resume",
+          "click .web-bar .resume",
           "waitfor .composer textarea",
           "click .composer textarea",
           "type Checked on mobile.",
@@ -135,8 +135,8 @@ describe("end to end", () => {
       const { noticed } = app.store.addNoticed({ repo: "e2e", runId, kind: "bug", title: "E2E noticed thing", detail: "Found while testing.", evidence: "" });
       const r = await browser.check({
         url: `${dash}/#token=${app.token}`,
-        steps: "waitfor .needs-noticed\nclick .needs-noticed .btn.primary\nwait 1200\nclick .petal.tint-aqua\nwait 300",
-        script: `JSON.stringify({ item: !!document.querySelector('.needs-noticed'), ticket: [...document.querySelectorAll('.petal-panel .card')].some((c) => c.textContent.includes('E2E noticed thing')) })`,
+        steps: "waitfor .needs-noticed\nclick .needs-noticed .btn.primary\nwait 1200\nclick .petal.tint-aqua\nwait 600",
+        script: `JSON.stringify({ item: !!document.querySelector('.needs-noticed'), ticket: [...document.querySelectorAll('.web-node')].some((c) => c.textContent.includes('E2E noticed thing')) })`,
         width: 1300,
         height: 900,
       });
@@ -150,8 +150,8 @@ describe("end to end", () => {
       const held = app.tickets.create({ repo: "e2e", title: "Phone nav", body: "b", source: "scout:tests", status: "held", decision_id: q.id });
       const r = await browser.check({
         url: `${dash}/#token=${app.token}`,
-        steps: "waitfor .needs-decision\nclick .needs-decision .needs-options .btn\nclick .needs-decision .needs-decide\nwait 1200\nclick .petal.tint-aqua\nwait 300",
-        script: `JSON.stringify({ open: !!document.querySelector('.needs-decision'), todo: [...document.querySelectorAll('.petal-panel .card')].some((c) => c.textContent.includes('Phone nav') && c.textContent.includes('Start')) })`,
+        steps: "waitfor .needs-decision\nclick .needs-decision .needs-options .btn\nclick .needs-decision .needs-decide\nwait 1200\nclick .petal.tint-aqua\nwait 600",
+        script: `JSON.stringify({ open: !!document.querySelector('.needs-decision'), todo: [...document.querySelectorAll('.web-node')].some((c) => c.textContent.includes('Phone nav') && c.textContent.includes('Start')) })`,
         width: 1300,
         height: 900,
       });
@@ -165,8 +165,8 @@ describe("end to end", () => {
       const t = app.tickets.create({ repo: "e2e", title: "Pin the toolchain", body: "why", source: "scout:infrastructure", status: "proposed", confidence: "medium" });
       const r = await browser.check({
         url: `${dash}/#token=${app.token}`,
-        steps: "waitfor .needs-proposed .chip.conf-medium\nclick .needs-proposed .btn.primary\nwait 1000\nclick .petal.tint-aqua\nwait 300",
-        script: `!document.querySelector('.needs-proposed') && [...document.querySelectorAll('.petal-panel .card')].some((c) => c.textContent.includes('Pin the toolchain') && c.textContent.includes('Start'))`,
+        steps: "waitfor .needs-proposed .chip.conf-medium\nclick .needs-proposed .btn.primary\nwait 1000\nclick .petal.tint-aqua\nwait 600",
+        script: `!document.querySelector('.needs-proposed') && [...document.querySelectorAll('.web-node')].some((c) => c.textContent.includes('Pin the toolchain') && c.textContent.includes('Start'))`,
         width: 1300,
         height: 900,
       });

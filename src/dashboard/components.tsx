@@ -4,7 +4,7 @@
  * stylesheet can style them.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Lesson, PermissionRequest, Run, RunEvent, Ticket } from "../core/types";
+import type { Lesson, Noticed, PermissionRequest, Run, RunEvent, Ticket } from "../core/types";
 import { api, authHeaders } from "./api";
 import { Markdown } from "./markdown";
 import { LIVE_STATES, WRITER_BUSY, readPng, stateLabel, toolArg, type Dashboard, type DecideBody, type Draft, type DraftAction, type LessonAction, type RankedDecision } from "./state";
@@ -327,54 +327,68 @@ export function lessonsTitle(items: Lesson[]): string {
 /** Short how-tos for a repo: proposed ones to approve, stale ones to recheck, approved ones to retire. */
 export function LessonsList({ d }: { d: Dashboard }) {
   const { proposed, stale, approved } = lessonGroups(d.lessons);
-  const onAct = d.lessonAct;
   return (
     <>
       {stale.map((l) => (
-        <div className="card lesson-item lesson-stale" key={l.id}>
-          <div className="row">
-            <span className="chip needs">recheck</span>
-            <span className="muted">
-              L{l.id} · {l.repo} · trunk changed {(JSON.parse(l.stale!).paths as string[]).join(", ")}
-            </span>
-          </div>
-          <div>{l.text}</div>
-          <div className="muted">Not given to runs until you confirm it's still true, or retire it.</div>
-          <div className="row">
-            <button className="btn primary" onClick={() => onAct(l.id, "confirm")}>
-              Still true
-            </button>
-            <button className="btn" onClick={() => onAct(l.id, "retire")}>
-              Retire
-            </button>
-          </div>
-        </div>
+        <LessonEntry key={l.id} d={d} l={l} />
       ))}
       {proposed.map((l) => (
-        <LessonCard key={l.id} l={l} onAct={onAct} onOpenRun={d.setSelected} />
+        <LessonEntry key={l.id} d={d} l={l} />
       ))}
       {approved.length > 0 && (
         <details className="approved">
           <summary className="muted">Approved · {approved.length}</summary>
           {approved.map((l) => (
-            <div className="card lesson-done" key={l.id}>
-              <div>
-                L{l.id}: {l.text}
-              </div>
-              <div className="row">
-                <span className="muted">
-                  {l.repo} · given to {l.uses} run{l.uses === 1 ? "" : "s"}
-                </span>
-                <span style={{ flex: 1 }} />
-                <button className="btn sm" onClick={() => onAct(l.id, "retire")} title="Stop giving this lesson to new runs">
-                  Retire
-                </button>
-              </div>
-            </div>
+            <LessonEntry key={l.id} d={d} l={l} />
           ))}
         </details>
       )}
     </>
+  );
+}
+
+/** One lesson as the Lessons list shows it: to recheck, proposed, or approved. */
+export function LessonEntry({ d, l }: { d: Dashboard; l: Lesson }) {
+  const onAct = d.lessonAct;
+  if (l.status === "proposed") return <LessonCard l={l} onAct={onAct} onOpenRun={d.setSelected} />;
+  if (l.status === "approved" && l.stale)
+    return (
+      <div className="card lesson-item lesson-stale">
+        <div className="row">
+          <span className="chip needs">recheck</span>
+          <span className="muted">
+            L{l.id} · {l.repo} · trunk changed {(JSON.parse(l.stale).paths as string[]).join(", ")}
+          </span>
+        </div>
+        <div>{l.text}</div>
+        <div className="muted">Not given to runs until you confirm it's still true, or retire it.</div>
+        <div className="row">
+          <button className="btn primary" onClick={() => onAct(l.id, "confirm")}>
+            Still true
+          </button>
+          <button className="btn" onClick={() => onAct(l.id, "retire")}>
+            Retire
+          </button>
+        </div>
+      </div>
+    );
+  return (
+    <div className="card lesson-done">
+      <div>
+        L{l.id}: {l.text}
+      </div>
+      <div className="row">
+        <span className="muted">
+          {l.repo} · {l.status === "approved" ? `given to ${l.uses} run${l.uses === 1 ? "" : "s"}` : l.status}
+        </span>
+        <span style={{ flex: 1 }} />
+        {l.status === "approved" && (
+          <button className="btn sm" onClick={() => onAct(l.id, "retire")} title="Stop giving this lesson to new runs">
+            Retire
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -383,41 +397,54 @@ export function NoticedList({ d }: { d: Dashboard }) {
   return (
     <>
       {d.noticed.map((n) => (
-        <div className="card noticed-item" key={n.id}>
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <span className={`chip kind-${n.kind}`}>{n.kind}</span>
-            {n.count > 1 && (
-              <span className="chip" title="Reports merged into this one">
-                ×{n.count}
-              </span>
-            )}
-          </div>
-          <div className="title">{n.title}</div>
-          {n.detail && <div className="detail">{n.detail.length > 240 ? `${n.detail.slice(0, 240)}…` : n.detail}</div>}
-          <div className="row">
-            <span className="muted">
-              {n.repo} ·{" "}
-              {n.run_ids
-                .split(",")
-                .filter(Boolean)
-                .map((r) => (
-                  <a key={r} href={`#run-${r}`} onClick={() => d.setSelected(Number(r))}>
-                    run {r}{" "}
-                  </a>
-                ))}
-            </span>
-          </div>
-          <div className="row">
-            <button className="btn" onClick={() => d.noticedTicket(n.id)} title="Create a ticket from this report (marked as worker-written)">
-              Make ticket
-            </button>
-            <button className="btn" onClick={() => d.noticedDismiss(n.id)}>
-              Dismiss
-            </button>
-          </div>
-        </div>
+        <NoticedEntry key={n.id} d={d} n={n} />
       ))}
     </>
+  );
+}
+
+/** One noticed report: what, where, which runs reported it, Make ticket / Dismiss. */
+export function NoticedEntry({ d, n, full }: { d: Dashboard; n: Noticed; full?: boolean }) {
+  return (
+    <div className="card noticed-item">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <span className={`chip kind-${n.kind}`}>{n.kind}</span>
+        {n.count > 1 && (
+          <span className="chip" title="Reports merged into this one">
+            ×{n.count}
+          </span>
+        )}
+      </div>
+      <div className="title">{n.title}</div>
+      {n.detail && <div className="detail">{!full && n.detail.length > 240 ? `${n.detail.slice(0, 240)}…` : n.detail}</div>}
+      {full && n.evidence && (
+        <details>
+          <summary className="muted">Evidence (agent-written)</summary>
+          <div className="detail">{n.evidence}</div>
+        </details>
+      )}
+      <div className="row">
+        <span className="muted">
+          {n.repo} ·{" "}
+          {n.run_ids
+            .split(",")
+            .filter(Boolean)
+            .map((r) => (
+              <a key={r} href={`#run-${r}`} onClick={() => d.setSelected(Number(r))}>
+                run {r}{" "}
+              </a>
+            ))}
+        </span>
+      </div>
+      <div className="row">
+        <button className="btn" onClick={() => d.noticedTicket(n.id)} title="Create a ticket from this report (marked as worker-written)">
+          Make ticket
+        </button>
+        <button className="btn" onClick={() => d.noticedDismiss(n.id)}>
+          Dismiss
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -611,7 +638,7 @@ export function DraftCard({ d, onAct, onOpenRun }: { d: Draft; onAct: (id: numbe
                 </button>
               </>
             )}
-            <button className="btn danger" onClick={() => onAct(d.run_id, "discard")}>
+            <button className="btn danger" onClick={() => confirm("Discard this draft? The writer's work on it is dropped.") && onAct(d.run_id, "discard")}>
               Discard
             </button>
           </>
