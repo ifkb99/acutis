@@ -135,7 +135,8 @@ export function scoutSettings(wf: Workflow, type: string): { focus: string; budg
 
 /** Operator decisions, for worker and scout prompts. Only decided rows: their text is the operator's. */
 export function decisionsSection(decisions: Decision[]): string {
-  const decided = decisions.filter((d) => d.status === "decided").slice(0, 40);
+  // Contract-change approvals are about one ticket, not standing policy: they'd linger in every prompt after the change lands.
+  const decided = decisions.filter((d) => d.status === "decided" && d.area !== "contract").slice(0, 40);
   if (!decided.length) return "";
   return `
 

@@ -81,6 +81,7 @@ export function defaultWorkflow(): Workflow {
     source: "(default)",
     library: { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE], describe: false, describe_budget_usd: 0.5, librarian: true },
     scouts: { auto_tickets: "high", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {} },
+    contracts: {},
   };
 }
 
@@ -137,6 +138,26 @@ function parseSetup(v: unknown): CommandGate[] {
   if (v === undefined) return [];
   if (!Array.isArray(v)) throw new Error('workflow: "setup" must be a list');
   return v.map((g, i) => parseCommand(g, "setup step", i));
+}
+
+/** `contracts: { name: { files: [globs], consumers?: [globs], check?: command } }`. */
+function parseContracts(v: unknown): Workflow["contracts"] {
+  if (v === undefined || v === null) return {};
+  if (typeof v !== "object" || Array.isArray(v)) throw new Error('workflow: "contracts" must be a map of name to { files, consumers, check }');
+  const out: Workflow["contracts"] = {};
+  for (const [name, raw] of Object.entries(v as Record<string, unknown>)) {
+    if (!/^[A-Za-z0-9_.-]{1,60}$/.test(name)) throw new Error(`workflow: contract name "${name}" must be letters, digits, . _ -`);
+    const c = (raw ?? {}) as Record<string, unknown>;
+    const files = asStringArray(c.files, `contracts.${name}.files`);
+    if (!files.length) throw new Error(`workflow: "contracts.${name}.files" must list the contract's files`);
+    if (c.check !== undefined && (typeof c.check !== "string" || !c.check.trim())) throw new Error(`workflow: "contracts.${name}.check" must be a command`);
+    out[name] = {
+      files,
+      consumers: c.consumers === undefined ? null : asStringArray(c.consumers, `contracts.${name}.consumers`),
+      check: typeof c.check === "string" ? c.check : undefined,
+    };
+  }
+  return out;
 }
 
 /**
@@ -228,6 +249,7 @@ export function parseWorkflow(text: string, source: string): Workflow {
   if (body.trim()) wf.template = body.trim();
   wf.library = parseLibrary(meta.library);
   wf.scouts = parseScouts(meta.scouts);
+  wf.contracts = parseContracts(meta.contracts);
   return wf;
 }
 
@@ -239,6 +261,19 @@ export function renderTemplate(template: string, ticket: Ticket): string {
     "ticket.repo": ticket.repo,
   };
   return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (all, key) => vars[key] ?? all);
+}
+
+/** The repo's contracts, for the worker prompt (names and paths only; the agent reads the files). */
+function contractsSection(wf: Workflow): string {
+  const entries = Object.entries(wf.contracts);
+  if (!entries.length) return "";
+  const lines = entries.map(
+    ([name, c]) => `- ${name}: ${c.files.join(", ")}${c.consumers ? ` (relied on by ${c.consumers.join(", ")})` : " (everything relies on it)"}`,
+  );
+  return `Contracts: interfaces other parts of this repo rely on. Don't change a contract's files unless your ticket asks for it; if your work needs a contract changed, use \`mcp__acutis__request_contract_change\` and carry on against the current contract. If a contract changes on trunk while you work, Acutis rebases you and shows you the change before landing.
+${lines.join("\n")}
+
+`;
 }
 
 export function describeGate(g: Gate): string {
@@ -304,7 +339,7 @@ Project knowledge: \`mcp__acutis__search_project\` searches this repo's docs (as
       : ""
   }
 
-Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket.${preview}${notes}${decisionsSection(opts.decisions ?? [])}
+${contractsSection(opts.workflow)}Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket.${preview}${notes}${decisionsSection(opts.decisions ?? [])}
 
 End with a short summary: what you changed, why, and how you verified it.`;
 }

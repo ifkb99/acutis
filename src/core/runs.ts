@@ -92,6 +92,7 @@ interface Active {
   noticedCount: number;
   gapCount: number;
   librarianCount: number;
+  contractRequests: number;
   /** Scout runs: setup and check results on trunk, what it filed, and whether its budget stopped it. */
   trunkResults?: string;
   scoutTickets: number;
@@ -150,6 +151,7 @@ function redactInput(input: unknown): unknown {
 const MAX_NOTICED_PER_RUN = 10;
 const MAX_GAPS_PER_RUN = 5;
 const MAX_LIBRARIAN_PER_RUN = 8;
+const MAX_CONTRACT_REQUESTS_PER_RUN = 3;
 const LIBRARIAN_TIMEOUT_MS = 120_000;
 
 /**
@@ -390,6 +392,7 @@ export class RunManager {
       noticedCount: 0,
       gapCount: 0,
       librarianCount: 0,
+      contractRequests: 0,
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -683,6 +686,7 @@ export class RunManager {
       noticedCount: 0,
       gapCount: 0,
       librarianCount: 0,
+      contractRequests: 0,
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -1021,7 +1025,47 @@ export class RunManager {
       if (!still()) return null;
       if (!r.ok) failures.push(`$ ${describeGate(gate)}${"code" in r ? `  (exit ${r.code})` : ""}\n${r.output}`);
     }
+    // A contract's own check runs when the run touches the contract or what depends on it.
+    if (!Object.keys(a.workflow.contracts).length) return failures;
+    const touch = this.contractTouch(a.workflow, await this.deps.workspaces.changedFiles(a.repo, a.ws));
+    if (!still()) return null;
+    for (const name of new Set([...touch.changes, ...touch.depends])) {
+      const check = a.workflow.contracts[name]?.check;
+      if (!check) continue;
+      if (!still()) return null;
+      const gate: CommandGate = { kind: "cmd", name: `contract ${name}`, run: check };
+      const r = await this.runCommand(runId, a, gate, "gate", still);
+      if (!still()) return null;
+      if (!r.ok) failures.push(`$ ${check}  (the "${name}" contract's check, exit ${r.code})\n${r.output}`);
+    }
     return failures;
+  }
+
+  /**
+   * Which contracts a run's changed files change (they edit the contract's files) and which they
+   * depend on (they change it, or touch its consumers; a contract with no consumers listed counts
+   * every change as depending on it).
+   */
+  private contractTouch(wf: Workflow, changed: string[]): { changes: string[]; depends: string[] } {
+    const match = (globs: string[], f: string) => globs.some((g) => new Bun.Glob(g).match(f));
+    const changes: string[] = [];
+    const depends: string[] = [];
+    for (const [name, c] of Object.entries(wf.contracts)) {
+      const edits = changed.some((f) => match(c.files, f));
+      if (edits) changes.push(name);
+      if (edits || (c.consumers === null ? changed.length > 0 : changed.some((f) => match(c.consumers!, f)))) depends.push(name);
+    }
+    return { changes, depends };
+  }
+
+  /** Contracts among `names` whose files differ between two commits (a contract new since `from` counts). */
+  private async staleContracts(repo: Repo, wf: Workflow, names: string[], from: string, to: string): Promise<string[]> {
+    const out: string[] = [];
+    for (const name of names) {
+      const c = wf.contracts[name];
+      if (c && (await this.deps.workspaces.changedBetween(repo, from, to, c.files)).length) out.push(name);
+    }
+    return out;
   }
 
   private async verify(runId: number) {
@@ -1035,6 +1079,13 @@ export class RunManager {
     const policyFiles = changed.filter((f) => f.startsWith(".acutis/") || f.startsWith(".claude/"));
     if (policyFiles.length) {
       hub.emit(runId, "policy.flag", { msg: "This change edits agent policy files (.acutis/ or .claude/). Review them carefully.", files: policyFiles });
+    }
+    const contractEdits = this.contractTouch(a.workflow, changed).changes;
+    if (contractEdits.length) {
+      hub.emit(runId, "contract.changed", {
+        contracts: contractEdits,
+        msg: `This change edits the ${contractEdits.join(", ")} contract${contractEdits.length > 1 ? "s" : ""}, which other parts of the project rely on. Approving it needs explicit acceptance.`,
+      });
     }
 
     const failures = await this.runGates(runId, a, "verifying");
@@ -1067,6 +1118,7 @@ export class RunManager {
     const wf = this.active.get(runId)?.workflow;
     if (wf?.library) tools.push(...this.libraryTools(runId, a));
     tools.push(this.noticedTool(runId, a));
+    if (wf && Object.keys(wf.contracts).length) tools.push(this.contractRequestTool(runId, a));
     tools.push(...this.previewTools(runId, a));
     return tools;
   }
@@ -1320,6 +1372,73 @@ export class RunManager {
     if (!(usd > 0)) return;
     const run = this.deps.store.getRun(runId);
     if (run) this.deps.hub.run(this.deps.store.updateRun(runId, { cost_usd: run.cost_usd + usd }));
+  }
+
+  /**
+   * request_contract_change: a worker whose work needs a contract changed asks for it instead of
+   * editing the contract. It becomes an open decision with a held "change the contract" ticket; the
+   * operator approves one proposal (the ticket goes to todo) and withdraws or rejects the others.
+   */
+  private contractRequestTool(runId: number, a: () => Active): AcutisTool {
+    return {
+      name: "request_contract_change",
+      description:
+        "Ask for a change to one of this repo's contracts (interfaces other parts rely on) when your work needs it, instead of editing the contract yourself. " +
+        "The operator decides; if approved it becomes its own ticket, lands first, and work that depends on the contract is rebased and adapted. Carry on against the current contract.",
+      params: {
+        contract: { type: "string", description: "The contract's name, as listed in your instructions." },
+        change: { type: "string", description: "The change, concretely (the new signature, field or rule)." },
+        why: { type: "string", description: "What your ticket needs that the current contract can't do, and who else it affects." },
+      },
+      handler: async (args): Promise<ToolOutput> => {
+        const x = a();
+        const name = clip(args.contract, 60);
+        if (!x.workflow.contracts[name]) {
+          return { text: `No contract "${name}" here. Contracts: ${Object.keys(x.workflow.contracts).join(", ")}.`, isError: true };
+        }
+        if (x.contractRequests >= MAX_CONTRACT_REQUESTS_PER_RUN) return { text: `This run already made ${MAX_CONTRACT_REQUESTS_PER_RUN} contract requests.`, isError: true };
+        const change = clip(String(args.change ?? "").replace(/\s+/g, " "), 300);
+        if (!change) return { text: "change is empty", isError: true };
+        const question = `Change the ${name} contract: ${change}`;
+        const known = this.deps.store.findDecisionByQuestion(x.repo.name, question);
+        if (known) {
+          return {
+            text:
+              known.status === "decided"
+                ? `Already decided (decision #${known.id}): ${known.decision}`
+                : `Already requested as decision #${known.id} (${known.status}).`,
+          };
+        }
+        x.contractRequests++;
+        const d = this.deps.store.addDecision({
+          repo: x.repo.name,
+          area: "contract",
+          question,
+          context: `Requested by the worker of run ${runId} (ticket #${x.ticket.id}: ${x.ticket.title}).\n\n${clip(args.why, 3000)}`,
+          options: "Approve this change (the held ticket goes to todo)\nKeep the contract as it is",
+          asked_by: "worker",
+          run_id: runId,
+        });
+        const t = this.deps.tickets.create({
+          repo: x.repo.name,
+          title: clip(`Change the ${name} contract: ${change}`, 200),
+          body: [
+            `Requested by the worker of run ${runId} while working on ticket #${x.ticket.id}. Worker-written: check it before acting.`,
+            "",
+            `Contract: ${name} (${x.workflow.contracts[name]!.files.join(", ")})`,
+            `Change: ${change}`,
+            "",
+            clip(args.why, 3000),
+          ].join("\n"),
+          source: "contract-request",
+          status: "held",
+          decision_id: d.id,
+        });
+        this.deps.hub.ticket(t);
+        this.deps.hub.emit(runId, "contract.request", { contract: name, decision: d.id, ticket: t.id, change });
+        return { text: `Requested as decision #${d.id}, with ticket #${t.id} waiting on it. Keep working against the current contract.` };
+      },
+    };
   }
 
   private noticedTool(runId: number, a: () => Active): AcutisTool {
@@ -1874,7 +1993,7 @@ ${this.workSnapshot(repo)}${gapList}`;
   }
 
   /** Queue a message. If the session is not live, resume it with this message. */
-  async message(runId: number, text: string, mode: "message" | "redirect" = "message") {
+  async message(runId: number, text: string, mode: "message" | "redirect" = "message", by: "operator" | "acutis" = "operator") {
     if (!text.trim()) throw new RunError("message is empty");
     const run = this.mustGet(runId);
     if (run.state === "verifying" || run.state === "landing" || run.state === "preparing" || run.state === "queued") {
@@ -1883,7 +2002,7 @@ ${this.workSnapshot(repo)}${gapList}`;
     if (run.state === "done" || run.state === "cancelled") throw new RunError(`run is ${run.state}`, 409);
 
     const a = this.active.get(runId);
-    this.deps.hub.emit(runId, "user.message", { text, mode, by: "operator" });
+    this.deps.hub.emit(runId, "user.message", { text, mode, by });
 
     if (a?.session) {
       if (mode === "redirect" && run.state === "running") {
@@ -1935,24 +2054,75 @@ ${this.workSnapshot(repo)}${gapList}`;
     this.releaseTicket(run.ticket_id);
   }
 
-  async approve(runId: number) {
+  /**
+   * Approve and land. A run that edits a contract, or (landing as a bookmark, where nothing is
+   * rebased) one whose contracts changed on trunk since it started, needs `acceptContracts`.
+   * Resolves `landed: false` when landing sent the run back to its agent (a contract it depends on
+   * changed on trunk).
+   */
+  async approve(runId: number, opts: { acceptContracts?: boolean } = {}): Promise<{ landed: boolean; reason?: string }> {
     const run = this.mustGet(runId);
     if (run.state !== "awaiting_review") throw new RunError(`can't approve a run that is ${run.state}`, 409);
+    // Checking contracts awaits jj before the run is marked landing: a second approve (a double
+    // click) must not slip into that gap.
+    if (this.approving.has(runId)) throw new RunError(`run ${runId} is already being approved`, 409);
+    this.approving.add(runId);
+    try {
+      return await this.approveOnce(runId, opts);
+    } finally {
+      this.approving.delete(runId);
+    }
+  }
+
+  private approving = new Set<number>();
+
+  private async approveOnce(runId: number, opts: { acceptContracts?: boolean }): Promise<{ landed: boolean; reason?: string }> {
     const a = await this.rehydrate(runId);
+    if (!opts.acceptContracts && Object.keys(a.workflow.contracts).length) {
+      // From the workspace as it is now, not from what verify saw.
+      const touch = this.contractTouch(a.workflow, await this.deps.workspaces.changedFiles(a.repo, a.ws));
+      if (touch.changes.length) {
+        this.deps.hub.emit(runId, "contract.changed", {
+          contracts: touch.changes,
+          msg: `This change edits the ${touch.changes.join(", ")} contract${touch.changes.length > 1 ? "s" : ""}. Approving it needs explicit acceptance.`,
+        });
+        throw new RunError(
+          `this run changes the ${touch.changes.join(", ")} contract${touch.changes.length > 1 ? "s" : ""}. Review the change, then approve with acceptContracts (acutis approve ${runId} --contracts).`,
+          409,
+        );
+      }
+      if (a.workflow.land !== "trunk" && touch.depends.length) {
+        const trunk = await this.deps.workspaces.resolve(a.repo, a.repo.base);
+        const stale = await this.staleContracts(a.repo, a.workflow, touch.depends, a.ws.baseCommit, trunk);
+        if (stale.length) {
+          this.deps.hub.emit(runId, "contract.stale", {
+            contracts: stale,
+            phase: "approve",
+            msg: `The ${stale.join(", ")} contract${stale.length > 1 ? "s" : ""} changed on ${a.repo.base} since this run started, and this repo lands as a bookmark (no rebase). Check the run against the new contract before accepting.`,
+          });
+          throw new RunError(
+            `the ${stale.join(", ")} contract${stale.length > 1 ? "s" : ""} changed on ${a.repo.base} since this run started. This repo lands as a bookmark, so the run isn't rebased: check it against the new contract, then approve with acceptContracts (acutis approve ${runId} --contracts).`,
+            409,
+          );
+        }
+      }
+    }
+    if (this.mustGet(runId).state !== "awaiting_review") throw new RunError(`can't approve a run that is ${this.mustGet(runId).state}`, 409);
     this.setState(runId, "landing");
     // Landings in one repo are serialised: each trunk landing must see the previous one.
     const prev = this.landing.get(a.repo.name) ?? Promise.resolve();
-    const mine = prev.catch(() => {}).then(() => this.land(runId, a));
+    const mine = prev.catch(() => {}).then(() => this.land(runId, a, opts));
     this.landing.set(a.repo.name, mine);
     try {
-      await mine;
+      return await mine;
     } finally {
       if (this.landing.get(a.repo.name) === mine) this.landing.delete(a.repo.name);
     }
   }
 
-  private async land(runId: number, a: Active) {
+  private async land(runId: number, a: Active, opts: { acceptContracts?: boolean } = {}): Promise<{ landed: boolean; reason?: string }> {
     const { workspaces, hub, store } = this.deps;
+    let changedContracts: string[] = [];
     const message = `${a.ticket.title}\n\nAcutis-Ticket: #${a.ticket.id}\nAcutis-Run: ${runId}\n`;
     const back = (reason: string, status = 409): never => {
       hub.emit(runId, "system.log", { level: "error", msg: `landing stopped: ${reason}` });
@@ -1968,6 +2138,21 @@ ${this.workSnapshot(repo)}${gapList}`;
         }
         await workspaces.land(a.repo, a.ws, { message, bookmark: null, push: false });
         const trunk = await workspaces.resolve(a.repo, a.repo.base);
+        // Contracts this run depends on that changed on trunk since it started, judged by the
+        // contract list on the new trunk (that's the policy it lands under). Before the rebase
+        // moves the base.
+        const oldBase = a.ws.baseCommit;
+        const trunkWf = await this.loadWorkflow(a.repo, trunk);
+        const touch = this.contractTouch(trunkWf, await workspaces.changedFiles(a.repo, a.ws));
+        changedContracts = touch.changes;
+        if (touch.changes.length && !opts.acceptContracts) {
+          hub.emit(runId, "contract.changed", { contracts: touch.changes, msg: `This change edits the ${touch.changes.join(", ")} contract, as declared on the new ${a.repo.base}. Approving it needs explicit acceptance.` });
+          return back(`this run changes the ${touch.changes.join(", ")} contract (as declared on the new ${a.repo.base}); review it, then approve with acceptContracts`);
+        }
+        const stale = await this.staleContracts(a.repo, trunkWf, touch.depends, oldBase, trunk);
+        const staleDiff = stale.length
+          ? await workspaces.diffBetween(a.repo, oldBase, trunk, stale.flatMap((n) => trunkWf.contracts[n]!.files))
+          : "";
         const { moved, conflicts } = await workspaces.rebase(a.repo, a.ws, trunk);
         if (moved) {
           // The change now sits on the new trunk: diffs, changed-file checks and policy loading
@@ -1981,6 +2166,10 @@ ${this.workSnapshot(repo)}${gapList}`;
           return back(
             `rebasing onto ${a.repo.base} (${trunk.slice(0, 12)}) left conflicts in: ${conflicts.join(", ")}. Send it back to the agent to resolve them, then approve again.`,
           );
+        }
+        if (stale.length) {
+          // A contract this work relies on changed under it: the agent adapts before anything lands.
+          return this.sendBackForContracts(runId, a, stale, staleDiff, trunk);
         }
         if (moved) {
           hub.emit(runId, "system.log", { msg: `Rebased onto ${a.repo.base} (${trunk.slice(0, 12)}); re-running checks on the combined result` });
@@ -2011,6 +2200,53 @@ ${this.workSnapshot(repo)}${gapList}`;
     this.active.delete(runId);
     this.setState(runId, "done", a.workflow.land === "trunk" ? `landed on ${bookmark}` : `landed as bookmark ${bookmark}`);
     hub.ticket(this.deps.tickets.setStatus(a.ticket.id, "done"));
+    if (a.workflow.land === "trunk" && changedContracts.length) this.noticeContractChange(runId, a.repo.name, changedContracts);
+    return { landed: true };
+  }
+
+  /**
+   * Landing found a contract this run depends on changed on trunk: the workspace is already
+   * rebased onto it, so hand the run back to its agent with the contract's diff. It comes back
+   * to review once it has adapted (and been checked again).
+   */
+  private async sendBackForContracts(runId: number, a: Active, stale: string[], diff: string, trunk: string): Promise<{ landed: false; reason: string }> {
+    const { hub } = this.deps;
+    const names = stale.join(", ");
+    const reason = `the ${names} contract${stale.length > 1 ? "s" : ""} changed on ${a.repo.base} since this run started`;
+    hub.emit(runId, "contract.stale", { contracts: stale, commit: trunk, phase: "landing", msg: `Landing stopped: ${reason}. The workspace was rebased and the run sent back to its agent.` });
+    this.previews.stop(runId);
+    this.setState(runId, "awaiting_review", `${reason}; sent back to the agent`);
+    const shown = diff.length > 8000 ? `${diff.slice(0, 8000)}\n… [${diff.length - 8000} more characters; read the files in your workspace]` : diff;
+    const text = [
+      `While this run waited for review, ${reason} (now ${trunk.slice(0, 12)}). Acutis rebased your workspace onto it.`,
+      "Adapt your work to the new contract. Don't change the contract itself unless your ticket asks for it; if you need it changed, use request_contract_change. Then summarize again.",
+      "",
+      "The contract change:",
+      "```diff",
+      shown || "(the contract's files were added or removed)",
+      "```",
+    ].join("\n");
+    // After this landing settles, so the run is in review when the message relaunches it.
+    queueMicrotask(() => {
+      this.message(runId, text, "message", "acutis").catch((e) =>
+        hub.emit(runId, "system.log", { level: "error", msg: `couldn't send the contract change to the agent: ${(e as Error).message}; send it with acutis msg` }),
+      );
+    });
+    return { landed: false, reason: `${reason}; sent back to the agent to adapt` };
+  }
+
+  /** A run that changed contracts landed: flag every other live run in the repo (no agent message: they adapt at landing). */
+  private noticeContractChange(byRun: number, repo: string, contracts: string[]) {
+    const live = new Set(["preparing", "running", "paused", "verifying", "awaiting_review"]);
+    for (const r of this.deps.store.listRuns(1000)) {
+      if (r.id === byRun || r.repo !== repo || r.kind === "scout" || !live.has(r.state)) continue;
+      this.deps.hub.emit(r.id, "contract.stale", {
+        contracts,
+        by_run: byRun,
+        phase: "notice",
+        msg: `Run ${byRun} changed the ${contracts.join(", ")} contract${contracts.length > 1 ? "s" : ""} on trunk. If this run depends on it, landing will rebase it and send it back to adapt.`,
+      });
+    }
   }
 
   /** Throw the work away: abandon the change and delete the workspace. */
