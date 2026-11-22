@@ -720,6 +720,8 @@ function RunView({
   queuePos: Map<number, number>;
 }) {
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const [acceptContracts, setAcceptContracts] = useState(false);
+  const touchesContract = events.some((e) => e.kind === "contract.changed" || e.kind === "contract.stale");
   const [perms, setPerms] = useState<PermissionRequest[]>([]);
   const [tab, setTab] = useState<"activity" | "diff">("activity");
   const [text, setText] = useState("");
@@ -799,8 +801,16 @@ function RunView({
         <div className="row">
           {s === "running" && <button className="btn" onClick={() => post("pause")}>Pause</button>}
           {s === "paused" && <button className="btn" onClick={() => post("resume")}>Resume</button>}
+          {s === "awaiting_review" && touchesContract && (
+            <label className="row contract-accept" title="This run changes a contract, or a contract it relies on changed: approving needs your explicit acceptance">
+              <input type="checkbox" checked={acceptContracts} onChange={(e) => setAcceptContracts(e.target.checked)} />
+              I've reviewed the contract change
+            </label>
+          )}
           {s === "awaiting_review" && (
-            <button className="btn primary" onClick={() => post("approve")}>Approve &amp; land</button>
+            <button className="btn primary" onClick={() => post("approve", { acceptContracts })}>
+              Approve &amp; land
+            </button>
           )}
           {run.workspace_path && !["done", "failed", "cancelled"].includes(s) && (
             <button className="btn" onClick={openPreview} title="Start this run's preview server (if the repo has one) and open it">
@@ -1092,6 +1102,15 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
         <div className="ev log">
           permission {d.behavior === "allow" ? (d.always ? "allowed for run" : "allowed") : d.by === "timeout" ? "timed out (denied)" : "denied"}: {d.tool}
           {d.message ? ` (${d.message})` : ""}
+        </div>
+      );
+    case "contract.changed":
+    case "contract.stale":
+      return <div className="ev flag">⚠ {d.msg}</div>;
+    case "contract.request":
+      return (
+        <div className="ev log">
+          requested a change to the {d.contract} contract (decision #{d.decision}, ticket #{d.ticket}): {d.change}
         </div>
       );
     case "policy.flag":

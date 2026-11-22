@@ -50,7 +50,7 @@ Runs
   acutis diff <run>
   acutis msg <run> <text>                      Message the agent (or send back from review)
   acutis redirect <run> <text>                 Interrupt the agent with new instructions
-  acutis pause|resume|kill|approve|discard <run>
+  acutis pause|resume|kill|approve|discard <run>   (approve --contracts: accept a contract change after reviewing it)
   acutis note <run> [text] [--image PNG]       Attach a reviewer note (not sent to the agent)
   acutis preview <run>                         Start the run's preview server and print its URL
 
@@ -246,6 +246,11 @@ function formatEvent(e: { id: number; kind: string; data: any }): string | null 
       return `note: ${d.text}${d.artifact ? " [image]" : ""}`;
     case "noticed":
       return `  noticed #${d.id} [${d.kind}] ${d.title}${d.merged ? ` (merged, ×${d.count})` : ""}`;
+    case "contract.changed":
+    case "contract.stale":
+      return `⚠ ${d.msg}`;
+    case "contract.request":
+      return `  requested a change to the ${d.contract} contract (decision #${d.decision}, ticket #${d.ticket}): ${d.change}`;
     case "scout.ticket":
       return `  filed ticket #${d.id} [${d.status}, ${d.confidence}] ${d.title}`;
     case "scout.decision":
@@ -387,7 +392,8 @@ async function runsCmd(c: string, args: string[]) {
     case "approve":
     case "discard": {
       const runId = runArg(args[0], usage);
-      await post(`/api/runs/${runId}/${c}`);
+      const out = await post(`/api/runs/${runId}/${c}`, c === "approve" ? { acceptContracts: args.includes("--contracts") } : {});
+      if (c === "approve" && out?.landed === false) console.log(`not landed: ${out.reason}`);
       const s = await api(`/api/runs/${runId}`);
       console.log(`run ${runId}: ${s.run.state}${s.run.bookmark && c === "approve" ? ` (${s.run.bookmark})` : ""}`);
       return;

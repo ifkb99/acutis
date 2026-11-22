@@ -212,7 +212,9 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
       "/api/runs/:id/pause": { POST: api((req) => runs.pause(runId(req))) },
       "/api/runs/:id/resume": { POST: api((req) => runs.resume(runId(req))) },
       "/api/runs/:id/kill": { POST: api((req) => runs.kill(runId(req))) },
-      "/api/runs/:id/approve": { POST: api((req) => runs.approve(runId(req))) },
+      "/api/runs/:id/approve": {
+        POST: api(async (req) => runs.approve(runId(req), { acceptContracts: (await body(req)).acceptContracts === true })),
+      },
       "/api/runs/:id/discard": { POST: api((req) => runs.discard(runId(req))) },
       "/api/runs/:id/permissions/:req": {
         POST: api(async (req) => {

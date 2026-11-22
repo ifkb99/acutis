@@ -27,6 +27,9 @@ export async function identityFor(cwd: string): Promise<Record<string, string>> 
   return env;
 }
 
+/** A repo-root-relative glob as a jj fileset (quoted, so paths with spaces work). */
+const fileset = (glob: string) => `root-glob:${JSON.stringify(glob)}`;
+
 export class JjError extends Error {}
 
 async function jj(cwd: string, args: string[], retryStale = true): Promise<string> {
@@ -101,6 +104,17 @@ export class JjWorkspaceProvider implements WorkspaceProvider {
   async listFiles(repo: Repo, commit: string): Promise<string[]> {
     const out = await jj(repo.path, ["file", "list", "--ignore-working-copy", "-r", commit]);
     return out.split("\n").filter(Boolean);
+  }
+
+  async changedBetween(repo: Repo, from: string, to: string, globs: string[]): Promise<string[]> {
+    if (!globs.length || from === to) return [];
+    const out = await jj(repo.path, ["diff", "--ignore-working-copy", "--from", from, "--to", to, "--name-only", ...globs.map(fileset)]);
+    return out.split("\n").filter(Boolean);
+  }
+
+  async diffBetween(repo: Repo, from: string, to: string, globs: string[]): Promise<string> {
+    if (!globs.length || from === to) return "";
+    return jj(repo.path, ["diff", "--ignore-working-copy", "--from", from, "--to", to, "--git", ...globs.map(fileset)]);
   }
 
   async readAt(repo: Repo, commit: string, file: string): Promise<string | null> {

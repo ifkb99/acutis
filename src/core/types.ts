@@ -123,6 +123,10 @@ export interface WorkspaceProvider {
   readAt(repo: Repo, commit: string, file: string): Promise<string | null>;
   /** Paths of the files tracked at a commit, relative to the repo root. */
   listFiles(repo: Repo, commit: string): Promise<string[]>;
+  /** Paths matching `globs` that differ between two commits (added, changed or deleted). */
+  changedBetween(repo: Repo, from: string, to: string, globs: string[]): Promise<string[]>;
+  /** A git-style diff of the paths matching `globs` between two commits. */
+  diffBetween(repo: Repo, from: string, to: string, globs: string[]): Promise<string>;
   create(repo: Repo, name: string, baseCommit: string): Promise<Workspace>;
   diff(repo: Repo, ws: Workspace): Promise<string>;
   changedFiles(repo: Repo, ws: Workspace): Promise<string[]>;
@@ -351,6 +355,12 @@ export interface Workflow {
         librarian: boolean;
       }
     | false;
+  /**
+   * Contracts: files one part of the project promises to the others. `files` are the contract
+   * itself, `consumers` the paths that depend on it (omitted: every change depends on it), and
+   * `check` an optional command run as an extra check when a run touches either.
+   */
+  contracts: Record<string, Contract>;
   /** Scouts the repo allows, with a focus and budget each; false turns scouts off. */
   scouts:
     | {
@@ -404,6 +414,12 @@ export interface LibraryGap {
   ticket_id: number | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface Contract {
+  files: string[];
+  consumers: string[] | null;
+  check?: string;
 }
 
 export type NoticedKind = "bug" | "failing-check" | "tech-debt" | "docs" | "security" | "idea" | "other";

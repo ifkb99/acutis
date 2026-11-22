@@ -240,6 +240,30 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Contracts (2026-11-22, phase 4 of the scouts plan)
+
+- **Declared in the workflow** (trunk policy): `contracts: { name: { files: [globs], consumers?: [globs], check?: command } }`.
+  A run *changes* a contract when its diff touches the contract's files (including deleting or adding one). It
+  *depends* on a contract when it changes it, or touches its consumers; with no `consumers` listed, every change
+  depends on it.
+- **Workers are told** the contracts (names and paths), not to edit them unless the ticket asks, and to use
+  `request_contract_change` otherwise. That files an open decision in the register (area `contract`) with a held
+  "change the contract" ticket. Approving a proposal moves the ticket to todo, and competing proposals are separate
+  decisions. Contract decisions stay out of the "operator decisions" prompt section: they're about one ticket, not
+  standing policy.
+- **Checks.** A contract's `check` runs as an extra gate whenever a run touches the contract or its consumers, at
+  verify time and again after a landing rebase.
+- **Acceptance.** Approving a run that changes a contract needs `acceptContracts`. That's `acutis approve --contracts`,
+  or the dashboard's "I've reviewed the contract change" box. It is computed from the workspace diff at approve time,
+  and in trunk mode again under the new trunk's contract list.
+- **Staleness** comes from the commits, not a stored fingerprint: a contract is stale for a run when its files
+  differ between the run's base and trunk.
+  - `land: trunk`: landing stops, the workspace is rebased (as it already was), and the run goes back to its agent
+    with the contract's diff (capped). It is re-checked and comes back to review.
+  - `land: bookmark`/`push`: nothing is rebased, so a stale contract needs `acceptContracts` instead.
+  - When a contract-changing run lands, other live runs in the repo get a `contract.stale` notice: a dashboard flag
+    only, no agent message, so nobody hand-applies a change their workspace doesn't have yet.
+
 ### Phase 3 of the scouts plan (2026-11-21): more scouts, a better library, the librarian
 
 Ideas from reviewing anima-research's connectome-host and context-manager; see the plan doc.

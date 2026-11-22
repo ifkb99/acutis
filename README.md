@@ -109,6 +109,11 @@ effort: high
 setup:                 # optional: run in the fresh workspace before the agent starts
   - bun install
 preview: bun --port=$PORT ./index.html   # optional: Acutis runs it; the agent gets preview/browser tools
+contracts:             # optional: interfaces other parts rely on
+  engine-api:
+    files: ["packages/engine/src/api.ts"]
+    consumers: ["packages/ai/**"]          # omitted: every change depends on it
+    check: "npm run build -w packages/ai"   # optional extra check when either is touched
 scouts:                # optional; every built-in scout is allowed by default, false = off
   auto_tickets: high   # high-confidence scout tickets go straight to todo (never = all wait in Proposed)
   budget_usd: 2
