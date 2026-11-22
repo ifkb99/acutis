@@ -6,14 +6,17 @@ import { FakeRunner, makeRepo, tempDir, waitFor, type FakeScript } from "./helpe
 
 /**
  * End to end against a live server with a scripted agent: the CLI's watch, and the dashboard's
- * permission card, notes editor, "Add note" and "Open preview", driven in real headless Chrome.
+ * Needs-you sidebar (permissions, noticed, decisions, proposed tickets), the run view's permission
+ * card, notes editor, "Add note" and "Open preview", driven in real headless Chrome.
  */
 const chrome = findChrome();
 const port = 18000 + Math.floor(Math.random() * 1000);
 const preview = `Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.PORT), fetch: () => new Response("preview ok") });`;
 
+// Two requests: the first is allowed from the sidebar on the hub, the second from the run view.
 const asksPermission: FakeScript = async (c) => {
   await c.spec.onPermission({ id: "perm-e2e-1", tool: "Bash", input: { command: "curl example.com" }, reason: "not in the allowlist", canAlwaysAllow: false });
+  await c.spec.onPermission({ id: "perm-e2e-2", tool: "Bash", input: { command: "curl example.org" }, reason: "not in the allowlist", canAlwaysAllow: false });
   c.emit({ kind: "agent.text", text: "**Done.** Changed `nothing`." });
   c.result();
   await c.nextMessage();
@@ -60,7 +63,24 @@ describe("end to end", () => {
   const browser = new ChromeBrowser(chrome);
   const dash = `http://127.0.0.1:${port}`;
   {
-    test.skipIf(!chrome)("the permission card's Allow once unblocks the run (headless Chrome)", async () => {
+    test.skipIf(!chrome)("the sidebar shows a pending permission on the hub, and Allow once answers it in one click (headless Chrome)", async () => {
+      const r = await browser.check({
+        url: `${dash}/#token=${app.token}`,
+        steps: "waitfor .needs-perm .allow-once\nclick .needs-perm .allow-once\nwait 800",
+        script: `JSON.stringify({ hub: !!document.querySelector('.rose-hub'), cmd: document.querySelector('.needs-perm .needs-cmd')?.textContent ?? null })`,
+        width: 1300,
+        height: 900,
+      });
+      expect(r.failure).toBeUndefined();
+      expect(app.store.events(runId).some((e) => e.kind === "permission.decision" && (e.data as any).id === "perm-e2e-1")).toBe(true);
+      await waitFor(() => app.runs.pendingPermissions(runId).some((p) => p.id === "perm-e2e-2"), 8000);
+      // The page stayed on the hub; the first request left the sidebar (the second may have arrived by then).
+      const out = JSON.parse(r.scriptResult!);
+      expect(out.hub).toBe(true);
+      expect(out.cmd).not.toBe("curl example.com");
+    }, 60000);
+
+    test.skipIf(!chrome)("the run view's permission card's Allow once unblocks the run (headless Chrome)", async () => {
       const r = await browser.check({
         url: `${dash}/#run-${runId}&token=${app.token}`,
         steps: "waitfor .perm .btn.ok\nclick .perm .btn.ok\nwait 800",
@@ -80,12 +100,17 @@ describe("end to end", () => {
       const r = await browser.check({
         url: `${dash}/#run-${runId}&token=${app.token}`,
         steps: [
-          "waitfor .reponotes summary",
+          // The run view opens first; notes live under the rose's New work petal.
           "waitfor .ev.text strong",
-          "click .reponotes summary",
+          "click .focus-bar .back",
+          "click .petal.tint-pearl",
+          "waitfor .reponotes textarea",
           "click .reponotes textarea",
           "type Prefer the Edit tool.",
           "click .reponotes .btn",
+          "wait 300",
+          "click .wheel-wrap .resume",
+          "waitfor .composer textarea",
           "click .composer textarea",
           "type Checked on mobile.",
           "click .composer button[title^='Save a review note']",
@@ -106,27 +131,27 @@ describe("end to end", () => {
       expect(r.blocked.some((b) => b.startsWith(`popup ${info!.origin}`))).toBe(true);
     }, 60000);
 
-    test.skipIf(!chrome)("the Noticed panel shows a worker's report and Make ticket turns it into a ticket (headless Chrome)", async () => {
+    test.skipIf(!chrome)("the sidebar shows a worker's noticed report and Make ticket turns it into a ticket (headless Chrome)", async () => {
       const { noticed } = app.store.addNoticed({ repo: "e2e", runId, kind: "bug", title: "E2E noticed thing", detail: "Found while testing.", evidence: "" });
       const r = await browser.check({
         url: `${dash}/#token=${app.token}`,
-        steps: "waitfor .noticed-item\nclick .noticed-item .btn\nwait 1200",
-        script: `JSON.stringify({ panel: !!document.querySelector('.noticed-item'), ticket: [...document.querySelectorAll('.card')].some((c) => c.textContent.includes('E2E noticed thing')) })`,
+        steps: "waitfor .needs-noticed\nclick .needs-noticed .btn.primary\nwait 1200\nclick .petal.tint-aqua\nwait 300",
+        script: `JSON.stringify({ item: !!document.querySelector('.needs-noticed'), ticket: [...document.querySelectorAll('.petal-panel .card')].some((c) => c.textContent.includes('E2E noticed thing')) })`,
         width: 1300,
         height: 900,
       });
       expect(r.failure).toBeUndefined();
-      expect(JSON.parse(r.scriptResult!)).toEqual({ panel: false, ticket: true });
+      expect(JSON.parse(r.scriptResult!)).toEqual({ item: false, ticket: true });
       expect(app.store.getNoticed(noticed.id)).toMatchObject({ status: "ticketed" });
     }, 60000);
 
-    test.skipIf(!chrome)("the Decisions panel answers a scout's question: an option starts the text, held tickets kept go to todo (headless Chrome)", async () => {
+    test.skipIf(!chrome)("the sidebar answers a scout's question: an option starts the text, held tickets go to todo (headless Chrome)", async () => {
       const q = app.store.addDecision({ repo: "e2e", area: "tests", question: "Do we support phones?", options: "Yes, from 390px\nDesktop only", asked_by: "tests" });
       const held = app.tickets.create({ repo: "e2e", title: "Phone nav", body: "b", source: "scout:tests", status: "held", decision_id: q.id });
       const r = await browser.check({
         url: `${dash}/#token=${app.token}`,
-        steps: "waitfor .decision-item\nclick .decision-item .row.wrap .btn\nclick .decision-item .btn.primary\nwait 1200",
-        script: `JSON.stringify({ open: !!document.querySelector('.decision-item'), todo: [...document.querySelectorAll('.card')].some((c) => c.textContent.includes('Phone nav') && c.textContent.includes('Start')) })`,
+        steps: "waitfor .needs-decision\nclick .needs-decision .needs-options .btn\nclick .needs-decision .needs-decide\nwait 1200\nclick .petal.tint-aqua\nwait 300",
+        script: `JSON.stringify({ open: !!document.querySelector('.needs-decision'), todo: [...document.querySelectorAll('.petal-panel .card')].some((c) => c.textContent.includes('Phone nav') && c.textContent.includes('Start')) })`,
         width: 1300,
         height: 900,
       });
@@ -136,16 +161,17 @@ describe("end to end", () => {
       expect(app.tickets.get(held.id)!.status).toBe("todo");
     }, 60000);
 
-    test.skipIf(!chrome)("Accept on a scout's proposed ticket moves it to Todo (headless Chrome)", async () => {
+    test.skipIf(!chrome)("Accept in the sidebar on a scout's proposed ticket moves it to Todo (headless Chrome)", async () => {
       const t = app.tickets.create({ repo: "e2e", title: "Pin the toolchain", body: "why", source: "scout:infrastructure", status: "proposed", confidence: "medium" });
       const r = await browser.check({
         url: `${dash}/#token=${app.token}`,
-        steps: "waitfor .chip.conf-medium\nclick .card .btn.sm.primary\nwait 1000",
-        script: `[...document.querySelectorAll('.card')].some((c) => c.textContent.includes('Pin the toolchain') && c.textContent.includes('Start'))`,
+        steps: "waitfor .needs-proposed .chip.conf-medium\nclick .needs-proposed .btn.primary\nwait 1000\nclick .petal.tint-aqua\nwait 300",
+        script: `!document.querySelector('.needs-proposed') && [...document.querySelectorAll('.petal-panel .card')].some((c) => c.textContent.includes('Pin the toolchain') && c.textContent.includes('Start'))`,
         width: 1300,
         height: 900,
       });
       expect(r.failure).toBeUndefined();
+      expect(r.scriptResult).toBe("true");
       expect(app.tickets.get(t.id)!.status).toBe("todo");
     }, 60000);
 
@@ -157,7 +183,7 @@ describe("end to end", () => {
         script: `(async () => {
           const asked = document.body.innerText.includes("acutis dashboard");
           location.hash = "token=${app.token}";
-          for (let i = 0; i < 50 && !document.querySelector(".layout .side"); i++) await new Promise((r) => setTimeout(r, 100));
+          for (let i = 0; i < 50 && !document.querySelector(".rose-shell"); i++) await new Promise((r) => setTimeout(r, 100));
           for (let i = 0; i < 50 && !document.body.innerText.includes("E2E"); i++) await new Promise((r) => setTimeout(r, 100));
           return JSON.stringify({ asked, signedIn: document.body.innerText.includes("E2E"), tokenInUrl: location.href.includes("token"), stored: localStorage.getItem("acutis-token") === "${app.token}" });
         })()`,

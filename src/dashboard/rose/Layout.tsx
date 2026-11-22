@@ -2,7 +2,8 @@
  * Rose window: a hub and a focus view. The hub is a rose of eight petals around a centre that
  * counts what needs you; each petal is one kind of work (runs waiting, drafts, decisions, …) and
  * opens beside the rose. Opening a run switches to a focused, full-width run view; the petals
- * stay reachable from its top bar.
+ * stay reachable from its top bar. In both views the left sidebar (NeedsYou.tsx) lists what needs
+ * the operator and answers most of it in one click; on phones it sits behind a toggle.
  */
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -21,8 +22,9 @@ import {
   SelectedRun,
   TicketCard,
   WaitingRuns,
-} from "../../components";
-import type { Dashboard } from "../../state";
+} from "../components";
+import type { Dashboard } from "../state";
+import { needsCount, NeedsYou } from "./NeedsYou";
 import "./styles.css";
 
 type PetalId = "waiting" | "drafts" | "decisions" | "lessons" | "noticed" | "proposed" | "board" | "new";
@@ -114,12 +116,51 @@ function PetalBody({ d, id }: { d: Dashboard; id: PetalId }) {
 }
 
 export function Layout({ d }: { d: Dashboard }) {
-  const ps = petals(d);
   const [mode, setMode] = useState<"hub" | "run">(() => (d.selected ? "run" : "hub"));
-  // Until the operator picks a petal, show the first one that needs them.
+  const [petal, setPetal] = useState<PetalId | null>(null);
+  const [navOpen, setNavOpen] = useState(false);
+  const openRun = (id: number) => {
+    d.setSelected(id);
+    setMode("run");
+    setNavOpen(false);
+  };
+  const goPetal = (id: PetalId) => {
+    setPetal(id);
+    setMode("hub");
+    setNavOpen(false);
+  };
+  const count = needsCount(d);
+  return (
+    <div className={`rose-shell ${navOpen ? "nav-open" : ""}`}>
+      <NeedsYou d={d} open={navOpen} onOpenRun={openRun} onPetal={goPetal} />
+      <button className="needs-toggle" aria-expanded={navOpen} onClick={() => setNavOpen((x) => !x)}>
+        {navOpen ? "Close" : <>Needs you{count > 0 && <b> {count}</b>}</>}
+      </button>
+      <div className="rose-content">
+        <Rose d={d} mode={mode} setMode={setMode} chosen={petal} setPetal={setPetal} goPetal={goPetal} />
+      </div>
+    </div>
+  );
+}
+
+function Rose({
+  d,
+  mode,
+  setMode,
+  chosen,
+  setPetal,
+  goPetal,
+}: {
+  d: Dashboard;
+  mode: "hub" | "run";
+  setMode: (m: "hub" | "run") => void;
+  chosen: PetalId | null;
+  setPetal: (id: PetalId) => void;
+  goPetal: (id: PetalId) => void;
+}) {
+  const ps = petals(d);
   // Until the operator picks a petal, open the first that needs them once the data is in, and keep
   // it open (so answering its last item doesn't make the panel jump away).
-  const [chosen, setPetal] = useState<PetalId | null>(null);
   const firstUrgent = ps.find((p) => p.urgent)?.id ?? null;
   useEffect(() => {
     if (!chosen && firstUrgent) setPetal(firstUrgent);
@@ -139,10 +180,6 @@ export function Layout({ d }: { d: Dashboard }) {
   };
   const total = d.attention.total;
   const current = ps.find((p) => p.id === petal)!;
-  const goPetal = (id: PetalId) => {
-    setPetal(id);
-    setMode("hub");
-  };
 
   if (mode === "run") {
     return (
@@ -165,12 +202,6 @@ export function Layout({ d }: { d: Dashboard }) {
           </nav>
           <Badges d={d} />
         </header>
-        {d.attention.waitingRuns.some((r) => r.id !== d.selected) && (
-          <div className="focus-waiting" onClick={openRunsOnClick}>
-            <span className="muted">Also waiting:</span>
-            <WaitingRuns d={d} exclude={d.selected} />
-          </div>
-        )}
         <main className="focus-run">
           <SelectedRun d={d} empty={<p>No run is open. Go back to the rose and pick one from the Board.</p>} />
         </main>

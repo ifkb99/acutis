@@ -1,7 +1,6 @@
 /**
- * All dashboard state, loading, hub handling and actions, independent of how it looks. Every
- * sample layout (src/dashboard/samples/*) gets the result of `useDashboard()` and only decides
- * what to show where.
+ * All dashboard state, loading, hub handling and actions, independent of how it looks. The layout
+ * (rose/Layout.tsx) gets the result of `useDashboard()` and only decides what to show where.
  */
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -16,6 +15,9 @@ export type Draft = DraftView & { run: Run };
 export type DraftAction = "answer" | "save" | "stop" | "discard" | "continue";
 export type LessonAction = "approve" | "reject" | "retire" | "edit" | "confirm";
 export type DecideBody = { decision: string; version: number; keep: number[]; drop: number[] };
+/** A pending permission request and the run it blocks. */
+export type PendingPermission = { runId: number; req: PermissionRequest };
+export type PermissionAnswer = { behavior: "allow"; always?: boolean } | { behavior: "deny"; message?: string };
 
 export type Column = { key: Ticket["status"]; label: string; collapsed?: boolean; hideEmpty?: boolean };
 export const COLUMNS: Column[] = [
@@ -28,6 +30,8 @@ export const COLUMNS: Column[] = [
 ];
 
 export const LIVE_STATES = ["queued", "preparing", "running", "paused", "verifying"];
+/** A writer is busy in these states; between turns it rests paused, waiting for the operator. */
+export const WRITER_BUSY = ["queued", "preparing", "running"];
 
 export function stateLabel(run: Run, queuePos: Map<number, number>): string {
   if (run.state === "queued") return queuePos.has(run.id) ? `queued · #${queuePos.get(run.id)} in line` : "queued";
@@ -78,7 +82,8 @@ export function useDashboard() {
         .catch(() => {}),
     [],
   );
-  const [pending, setPending] = useState<Map<string, number>>(new Map());
+  // Request id → the full request, so the sidebar can show and answer it without opening the run.
+  const [pending, setPending] = useState<Map<string, PendingPermission>>(new Map());
   const eventSink = useRef<((e: RunEvent) => void) | null>(null);
 
   const reload = useCallback(async () => {
@@ -88,7 +93,7 @@ export function useDashboard() {
     setRuns(new Map(s.runs.map((r: Run) => [r.id, r])));
     setSandbox(s.sandbox);
     setSandboxReason(s.sandboxReason);
-    setPending(new Map((s.permissions ?? []).map((p: { runId: number; req: PermissionRequest }) => [p.req.id, p.runId])));
+    setPending(new Map((s.permissions ?? []).map((p: PendingPermission) => [p.req.id, { runId: p.runId, req: p.req }])));
     setScoutTypes(s.scoutTypes ?? []);
     await Promise.all([loadNoticed(), loadDecisions(), loadLessons(), loadDrafts()]);
   }, [loadNoticed, loadDecisions, loadLessons, loadDrafts]);
@@ -126,7 +131,10 @@ export function useDashboard() {
       if (e.kind.startsWith("scout.")) loadDecisions();
       if (e.kind === "lesson.proposed" || e.kind === "lesson.stale") loadLessons();
       if (e.kind.startsWith("writer.")) loadDrafts();
-      if (e.kind === "permission.request") setPending((p) => new Map(p).set((e.data as any).id, e.run_id));
+      if (e.kind === "permission.request") {
+        const req = e.data as unknown as PermissionRequest;
+        setPending((p) => new Map(p).set(req.id, { runId: e.run_id, req }));
+      }
       else if (e.kind === "permission.decision") {
         setPending((p) => {
           const n = new Map(p);
@@ -142,7 +150,7 @@ export function useDashboard() {
   useEffect(() => {
     document.title = pending.size ? `(${pending.size}) Acutis — needs you` : "Acutis";
   }, [pending]);
-  const pendingRuns = useMemo(() => new Set(pending.values()), [pending]);
+  const pendingRuns = useMemo(() => new Set([...pending.values()].map((p) => p.runId)), [pending]);
 
   // Reload state after reconnecting so nothing missed while offline is lost.
   const wasConnected = useRef(false);
@@ -184,6 +192,9 @@ export function useDashboard() {
         putRun(run);
         setSelected(run.id);
       }),
+    /** Answer a run's permission request. The hub's permission.decision event then clears it everywhere. */
+    answerPermission: (runId: number, id: string, answer: PermissionAnswer) =>
+      act(() => api(`/api/runs/${runId}/permissions/${id}`, "POST", answer)),
     acceptTicket: (id: number) => act(() => api(`/api/tickets/${id}/accept`, "POST")),
     rejectTicket: (id: number) => act(() => api(`/api/tickets/${id}/reject`, "POST")),
     /** Add a ticket. Errors go to the toast; resolves true when it was created. */
@@ -258,7 +269,7 @@ export function useDashboard() {
     const waitingRuns = [...runs.values()]
       .filter((r) => pendingRuns.has(r.id) || (r.kind === "work" && r.state === "awaiting_review"))
       .sort((a, b) => Number(pendingRuns.has(b.id)) - Number(pendingRuns.has(a.id)) || b.id - a.id);
-    const draftsWaiting = drafts.filter((x) => !LIVE_STATES.includes(x.run.state)).length;
+    const draftsWaiting = drafts.filter((x) => !WRITER_BUSY.includes(x.run.state)).length;
     const lessonsWaiting = lessons.filter((l) => l.status === "proposed" || (l.status === "approved" && l.stale)).length;
     const proposed = board.find((c) => c.key === "proposed")?.items.length ?? 0;
     return {

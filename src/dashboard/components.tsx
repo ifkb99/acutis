@@ -1,13 +1,13 @@
 /**
- * Panels and run view shared by every sample layout. They hold only local form state; data and
- * actions come from `useDashboard()` (state.ts). Class names are stable so each sample can style
- * them from its own scoped stylesheet.
+ * Panels and run view used by the layout (rose/Layout.tsx). They hold only local form state; data
+ * and actions come from `useDashboard()` (state.ts). Class names are stable so the layout's
+ * stylesheet can style them.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Lesson, PermissionRequest, Run, RunEvent, Ticket } from "../core/types";
 import { api, authHeaders } from "./api";
 import { Markdown } from "./markdown";
-import { LIVE_STATES, readPng, stateLabel, toolArg, type Dashboard, type DecideBody, type Draft, type DraftAction, type LessonAction, type RankedDecision } from "./state";
+import { LIVE_STATES, WRITER_BUSY, readPng, stateLabel, toolArg, type Dashboard, type DecideBody, type Draft, type DraftAction, type LessonAction, type RankedDecision } from "./state";
 
 // ------------------------------------------------------------------- chrome
 
@@ -318,7 +318,7 @@ export function lessonGroups(items: Lesson[]) {
   };
 }
 
-/** The Lessons heading. tests/e2e-lessons.test.ts reads it as `.lessons h2`, so every sample uses it. */
+/** The Lessons heading. tests/e2e-lessons.test.ts reads it as `.lessons h2`, so the layout uses it. */
 export function lessonsTitle(items: Lesson[]): string {
   const { proposed, stale } = lessonGroups(items);
   return `Lessons · ${proposed.length} proposed${stale.length ? ` · ${stale.length} to recheck` : ""}`;
@@ -458,7 +458,7 @@ export function ScoutsList({ d }: { d: Dashboard }) {
 // ------------------------------------------------------------------- cards
 
 export function DraftCard({ d, onAct, onOpenRun }: { d: Draft; onAct: (id: number, action: DraftAction, body?: unknown) => void; onOpenRun: (runId: number) => void }) {
-  const busy = ["queued", "preparing", "running"].includes(d.run.state);
+  const busy = WRITER_BUSY.includes(d.run.state);
   const [title, setTitle] = useState(d.draft?.title ?? "");
   const [body, setBody] = useState(d.draft?.body ?? "");
   const [editing, setEditing] = useState(false);
@@ -890,8 +890,9 @@ export function RunView({
             <button
               className="btn danger"
               onClick={() => {
-                const message = prompt("Tell the agent why (optional):") ?? undefined;
-                post(`permissions/${p.id}`, { behavior: "deny", message });
+                // Cancelling the prompt keeps the request open; OK (with or without a message) denies.
+                const message = prompt("Deny this request. Tell the agent why (optional):");
+                if (message !== null) post(`permissions/${p.id}`, { behavior: "deny", message: message || undefined });
               }}
             >
               Deny
