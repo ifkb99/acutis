@@ -157,6 +157,8 @@ export type AgentEvent =
       turns: number;
       duration_ms: number;
       errors?: string[];
+      /** Per-model running token totals for the session (main loop and subagents), when the runner reports them. */
+      model_usage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number }>;
     }
   | { kind: "agent.exit"; error?: string };
 
@@ -357,6 +359,22 @@ export interface Decision {
   created_at: string;
   updated_at: string;
   decided_at: string | null;
+}
+
+/** A question a worker searched the project's docs for and couldn't answer. */
+export interface LibraryGap {
+  id: number;
+  repo: string;
+  question: string;
+  /** What the reporter searched or read before giving up. */
+  tried: string;
+  status: "open" | "ticketed" | "dismissed";
+  count: number;
+  run_ids: string;
+  /** The ticket meant to close it: pending while that ticket is proposed, ticketed once accepted. */
+  ticket_id: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export type NoticedKind = "bug" | "failing-check" | "tech-debt" | "docs" | "security" | "idea" | "other";

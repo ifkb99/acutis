@@ -28,6 +28,13 @@ export interface Chunk {
   body: string;
 }
 
+/**
+ * How far to trust a library entry: approved = trunk docs and the operator's decisions (a human
+ * reviewed or wrote them); reviewed = landed runs' reports (the work was reviewed, the text is the
+ * worker's). Scout and noticed text never enters the library.
+ */
+export const TIER: Record<"doc" | "run" | "decision", "approved" | "reviewed"> = { doc: "approved", decision: "approved", run: "reviewed" };
+
 export interface LibraryHit {
   id: string;
   kind: "doc" | "run" | "decision";
@@ -223,7 +230,7 @@ export class Library {
       .query<{ rowid: number; kind: LibraryHit["kind"]; ref: string; line: number; heading: string; snip: string }, any[]>(
         `SELECT rowid, kind, ref, line, heading, snippet(library, 1, '', '', '…', 32) AS snip
          FROM library WHERE library MATCH ? AND repo = ? AND (commit_id = ? OR kind IN ('run', 'decision'))
-         ORDER BY bm25(library, 4.0, 1.0) LIMIT ?`,
+         ORDER BY bm25(library, 4.0, 1.0) * CASE kind WHEN 'run' THEN 0.8 ELSE 1.0 END LIMIT ?`,
       )
       .all(q, repo, commit ?? "", Math.max(1, Math.min(10, limit)))
       .map((r) => ({ id: `L${r.rowid}`, kind: r.kind, ref: r.ref, line: Number(r.line), heading: r.heading, snippet: r.snip }));
@@ -248,7 +255,11 @@ export function formatHits(hits: LibraryHit[], header: string): string {
   let shown = 0;
   for (const h of hits) {
     const where =
-      h.kind === "doc" ? `${h.ref}:${h.line}` : h.kind === "decision" ? `${h.ref} (the operator's decision)` : `${h.ref} (landed; summary written by its worker)`;
+      h.kind === "doc"
+        ? `${h.ref}:${h.line} [approved: trunk doc]`
+        : h.kind === "decision"
+          ? `${h.ref} [approved: the operator's decision]`
+          : `${h.ref} [reviewed: landed run, summary written by its worker]`;
     const block = `\n[${h.id}] ${where}${h.heading ? ` · ${h.heading}` : ""}\n  ${h.snippet.replace(/\s+/g, " ").trim()}`;
     if (used + block.length > SEARCH_BUDGET_CHARS) break;
     out.push(block);

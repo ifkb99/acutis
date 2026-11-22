@@ -28,6 +28,7 @@ import type {
   CommandSandbox,
   Decision,
   Gate,
+  LibraryGap,
   Noticed,
   NoticedKind,
   PermissionDecision,
@@ -77,8 +78,9 @@ interface Active {
   /** In-flight cost poll (single-flight) and when the last one started. */
   costPoll: Promise<void> | null;
   lastCostPoll: number;
-  /** Noticed reports filed by this run's worker (capped per run). */
+  /** Noticed reports and library gaps filed by this run's worker (capped per run). */
   noticedCount: number;
+  gapCount: number;
   /** Scout runs: setup and check results on trunk, what it filed, and whether its budget stopped it. */
   trunkResults?: string;
   scoutTickets: number;
@@ -131,6 +133,7 @@ function redactInput(input: unknown): unknown {
   }
 }
 const MAX_NOTICED_PER_RUN = 10;
+const MAX_GAPS_PER_RUN = 5;
 /** Agent-written text that Acutis stores or passes on: trimmed, capped, and with credentials redacted. */
 const clip = (s: unknown, n: number) => redactSecrets(String(s ?? "")).trim().slice(0, n);
 
@@ -327,6 +330,7 @@ export class RunManager {
       costPoll: null,
       lastCostPoll: 0,
       noticedCount: 0,
+      gapCount: 0,
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -423,6 +427,17 @@ export class RunManager {
 
   // ---------------------------------------------------------------- noticed
 
+  listGaps(repo?: string, status?: LibraryGap["status"]): LibraryGap[] {
+    return this.deps.store.listGaps({ repo, status });
+  }
+
+  dismissGap(id: number): LibraryGap {
+    const g = this.deps.store.getGap(id);
+    if (!g) throw new RunError(`gap #${id} not found`, 404);
+    if (g.status !== "open") throw new RunError(`gap #${id} is ${g.status}`, 409);
+    return this.deps.store.updateGap(id, { status: "dismissed" });
+  }
+
   listNoticed(status?: Noticed["status"]): Noticed[] {
     return this.deps.store.listNoticed(status);
   }
@@ -480,6 +495,7 @@ export class RunManager {
       costPoll: null,
       lastCostPoll: 0,
       noticedCount: 0,
+      gapCount: 0,
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -890,14 +906,16 @@ export class RunManager {
           }
           const limit = typeof args.limit === "number" ? args.limit : 6;
           const hits = this.library.search(x.repo.name, commit, query, limit);
-          if (!hits.length) return { text: `No library results for "${query}"${note}. Try other words, or search the code with Grep.` };
           const where = commit ? `docs as of ${commit.slice(0, 12)}` : "landed runs only";
-          return {
-            text: formatHits(
-              hits,
-              `Project library, ${where}${note}. ${hits.length} result(s) for "${query}". Open one in full with read_project_entry; doc paths are also files in your workspace.`,
-            ),
-          };
+          const text = hits.length
+            ? formatHits(
+                hits,
+                `Project library, ${where}${note}. ${hits.length} result(s) for "${query}". Open one in full with read_project_entry; doc paths are also files in your workspace.`,
+              )
+            : `No library results for "${query}"${note}. Try other words, or search the code with Grep. If the docs should explain this and don't, say so with report_library_gap.`;
+          // Receipt: what this run was shown (the A/B compares these; reads outside the tools aren't counted here).
+          this.deps.hub.emit(runId, "library.search", { query, ids: hits.map((h) => h.id), chars: text.length });
+          return { text };
         },
       },
       {
@@ -909,8 +927,38 @@ export class RunManager {
           const e = this.library.read(x.repo.name, String(args.id ?? ""));
           if (!e) return { text: `No library entry ${JSON.stringify(args.id)} for this repo.`, isError: true };
           const where =
-            e.kind === "doc" ? `${e.ref}:${e.line}` : e.kind === "decision" ? `${e.ref} (the operator's decision)` : `${e.ref} (landed; written by its worker)`;
-          return { text: `[${String(args.id).trim()}] ${where}${e.heading ? ` · ${e.heading}` : ""}\n\n${clip(e.body, 4000)}` };
+            e.kind === "doc"
+              ? `${e.ref}:${e.line} [approved: trunk doc]`
+              : e.kind === "decision"
+                ? `${e.ref} [approved: the operator's decision]`
+                : `${e.ref} [reviewed: landed run, written by its worker]`;
+          const text = `[${String(args.id).trim()}] ${where}${e.heading ? ` · ${e.heading}` : ""}\n\n${clip(e.body, 4000)}`;
+          this.deps.hub.emit(runId, "library.read", { id: String(args.id).trim(), chars: text.length });
+          return { text };
+        },
+      },
+      {
+        name: "report_library_gap",
+        description:
+          "Record a question you looked for in the project's docs and couldn't answer, so the docs can be improved. " +
+          "Only for things the docs should explain (how to run, conventions, why something is the way it is), not for facts you can read in the code.",
+        params: {
+          question: { type: "string", description: 'The question, e.g. "How are mods loaded and validated?"' },
+          tried: { type: "string", description: "What you searched for or read before giving up." },
+        },
+        handler: async (args): Promise<ToolOutput> => {
+          const x = a();
+          const question = clip(String(args.question ?? "").replace(/\s+/g, " "), 300);
+          if (!question) return { text: "question is empty", isError: true };
+          if (x.gapCount >= MAX_GAPS_PER_RUN) return { text: `This run already reported ${MAX_GAPS_PER_RUN} gaps.`, isError: true };
+          x.gapCount++;
+          const { gap, merged } = this.deps.store.addGap(
+            { repo: x.repo.name, runId, question, tried: clip(args.tried, 1000) },
+            // Settled once its ticket is done, or dismissed by the operator; otherwise a repeat is counted.
+            (g) => g.status === "dismissed" || (g.status === "ticketed" && g.ticket_id !== null && this.deps.tickets.get(g.ticket_id)?.status === "done"),
+          );
+          this.deps.hub.emit(runId, "library.gap", { id: gap.id, question: gap.question, merged, count: gap.count });
+          return { text: merged ? `Counted against gap #${gap.id} (${gap.count} reports).` : `Recorded as gap #${gap.id}.` };
         },
       },
     ];
@@ -1063,9 +1111,20 @@ export class RunManager {
 
   /** The scout's first message: its task, plus existing work as labelled data. */
   private scoutBrief(repo: string, type: string, focus: string): string {
+    const gaps =
+      type === "docs"
+        ? this.deps.store.listGaps({ repo, status: "open" }).slice(0, 30)
+        : [];
+    const gapList = gaps.length
+      ? `\n\nLibrary gaps workers reported (questions the docs didn't answer; most-reported first; pass their ids as from_gaps when a ticket would close them):\n${gaps
+          .map((g) => `- gap #${g.id} (×${g.count})${g.ticket_id ? ` [ticket #${g.ticket_id} pending]` : ""}: ${g.question}${g.tried ? ` (they tried: ${g.tried.slice(0, 160)})` : ""}`)
+          .join("\n")}`
+      : type === "docs"
+        ? "\n\nLibrary gaps workers reported: (none yet)"
+        : "";
     return `Scout ${repo} for ${SCOUT_TYPES[type]!.title.toLowerCase()} work.${focus ? ` Focus: ${focus}` : ""}
 
-${this.workSnapshot(repo)}`;
+${this.workSnapshot(repo)}${gapList}`;
   }
 
   /**
@@ -1183,6 +1242,7 @@ ${this.workSnapshot(repo)}`;
           rationale: { type: "string", description: "Why this confidence, in a sentence.", optional: true },
           depends_on: { type: "number", description: "Id of an open decision this work depends on.", optional: true },
           from_noticed: { type: "number", description: "Id of the noticed report this comes from.", optional: true },
+          from_gaps: { type: "string", description: "Comma-separated ids of library gaps this ticket would close (docs work).", optional: true },
         },
         handler: async (args): Promise<ToolOutput> => {
           const x = a();
@@ -1212,6 +1272,14 @@ ${this.workSnapshot(repo)}`;
             if (!n || n.repo !== x.repo.name || n.status !== "open") return { text: `from_noticed must be an open noticed report in this repo (got ${args.from_noticed}).`, isError: true };
             noticedId = n.id;
           }
+          const gapIds = String(args.from_gaps ?? "")
+            .split(",")
+            .map((g) => Number(g.trim()))
+            .filter((g) => g > 0);
+          for (const g of gapIds) {
+            const gap = this.deps.store.getGap(g);
+            if (!gap || gap.repo !== x.repo.name || gap.status !== "open") return { text: `from_gaps: gap #${g} isn't an open gap in this repo.`, isError: true };
+          }
           const settings = scoutSettings(x.workflow, type);
           const status = decisionId ? "held" : confidence === "high" && settings?.auto_tickets === "high" ? "todo" : "proposed";
           const evidence = clip(args.evidence, 4000);
@@ -1224,6 +1292,8 @@ ${this.workSnapshot(repo)}`;
           ].join("\n");
           const t = this.deps.tickets.create({ repo: x.repo.name, title, body, source: scoutSource(type), status, confidence, decision_id: decisionId, noticed_id: noticedId });
           if (status === "todo" && noticedId) this.deps.store.updateNoticed(noticedId, { status: "ticketed", ticket_id: t.id });
+          // A gap closes when its ticket is accepted (now, if it went straight to todo).
+          for (const g of gapIds) this.deps.store.updateGap(g, { ticket_id: t.id, status: status === "todo" ? "ticketed" : "open" });
           this.deps.hub.ticket(t);
           x.scoutTickets++;
           changed(x, "scout.ticket", { id: t.id, title, status, confidence });
@@ -1406,6 +1476,9 @@ ${this.workSnapshot(repo)}`;
 
   private ticketDecided(t: Ticket, status: "todo" | "cancelled"): Ticket {
     const out = this.deps.tickets.setStatus(t.id, status);
+    for (const g of this.deps.store.listGaps({ repo: t.repo, status: "open" }).filter((g) => g.ticket_id === t.id)) {
+      this.deps.store.updateGap(g.id, status === "todo" ? { status: "ticketed" } : { ticket_id: null });
+    }
     // A noticed report is marked ticketed only once its ticket is accepted.
     if (status === "todo" && t.noticed_id && this.deps.store.getNoticed(t.noticed_id)?.status === "open") {
       this.deps.store.updateNoticed(t.noticed_id, { status: "ticketed", ticket_id: t.id });

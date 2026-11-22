@@ -47,7 +47,7 @@ describe("scout runs", () => {
     expect(run.scout).toBe("infrastructure");
     await until(app, run.id, "done");
 
-    expect(toolNames).toEqual(["search_project", "read_project_entry", "list_work", "propose_ticket", "ask_decision", "update_decision", "withdraw_decision", "merge_decision"]);
+    expect(toolNames).toEqual(["search_project", "read_project_entry", "report_library_gap", "list_work", "propose_ticket", "ask_decision", "update_decision", "withdraw_decision", "merge_decision"]);
     expect(system).toContain("# Acutis scout: Infrastructure");
     // A failing setup step and check on trunk are findings handed to the scout, not run failures.
     expect(system).toContain("setup `exit 3`: FAILED (exit 3)");
@@ -385,7 +385,7 @@ describe("tickets and decisions from scouts", () => {
     expect(system).toContain("Operator decisions for this repo");
     expect(system).toContain("Yes: one monorepo with npm workspaces.");
     expect(system).toContain(`#${op.id}: Never add a dependency without asking.`);
-    expect(found).toContain(`decision #${q.id} (the operator's decision)`);
+    expect(found).toContain(`decision #${q.id} [approved: the operator's decision]`);
 
     const s = await app.runs.startScout("demo", "infrastructure");
     await until(app, s.id, "done");

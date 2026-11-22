@@ -117,6 +117,14 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
       },
       "/api/tickets/:id/accept": { POST: api((req) => runs.acceptTicket(Number(req.params.id))) },
       "/api/tickets/:id/reject": { POST: api((req) => runs.rejectTicket(Number(req.params.id))) },
+      "/api/gaps": {
+        GET: api((req) => {
+          const q = new URL(req.url).searchParams;
+          const status = q.get("status");
+          return runs.listGaps(q.get("repo") ?? undefined, status === "all" ? undefined : ((status as any) ?? "open"));
+        }),
+      },
+      "/api/gaps/:id/dismiss": { POST: api((req) => runs.dismissGap(Number(req.params.id))) },
       "/api/noticed/:id/dismiss": { POST: api((req) => runs.dismissNoticed(Number(req.params.id))) },
       "/api/noticed/:id/ticket": { POST: api((req) => runs.ticketFromNoticed(Number(req.params.id))) },
       "/api/repos/:name": {

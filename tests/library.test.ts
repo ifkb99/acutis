@@ -111,7 +111,7 @@ describe("library and noticed in runs", () => {
     const run = await app.runs.start(ticket("t").id);
     await waitFor(() => app.store.getRun(run.id)!.state === "awaiting_review", 10000);
 
-    expect(out.token).toContain("docs/auth.md:5 · Auth > Tokens");
+    expect(out.token).toContain("docs/auth.md:5 [approved: trunk doc] · Auth > Tokens");
     expect(out.token!.length).toBeLessThan(SEARCH_BUDGET_CHARS + 200);
     expect(out.read).toContain("The daemon token lives in ACUTIS_HOME");
     expect(out.secret).toContain("No library results");
@@ -138,7 +138,7 @@ describe("library and noticed in runs", () => {
     await app.runs.approve(r1.id);
     const r2 = await app.runs.start(ticket("Next").id);
     await waitFor(() => app.store.getRun(r2.id)!.state === "awaiting_review", 10000);
-    expect(found).toContain(`run ${r1.id} (landed; summary written by its worker) · Run ${r1.id}: Cache tuning`);
+    expect(found).toContain(`run ${r1.id} [reviewed: landed run, summary written by its worker] · Run ${r1.id}: Cache tuning`);
   });
 
   test("run summary ids stay valid after another run lands", async () => {

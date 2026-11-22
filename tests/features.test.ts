@@ -238,7 +238,7 @@ describe("operator features", () => {
     const { app, ticket } = await setup([script], { ".acutis/workflow.md": wf, "serve.js": server }, { browser });
     const run = await app.runs.start(ticket.id);
     await until(app, run.id, "awaiting_review");
-    expect(toolNames).toEqual(["search_project", "read_project_entry", "report_noticed", "preview", "browser"]);
+    expect(toolNames).toEqual(["search_project", "read_project_entry", "report_library_gap", "report_noticed", "preview", "browser"]);
     expect(toolOut.images[0].data).toBe(PNG);
     expect(badOut.isError).toBe(true);
     const origin = new URL(browser.checks[0]!.url).origin;

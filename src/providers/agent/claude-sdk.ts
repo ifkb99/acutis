@@ -67,6 +67,22 @@ function acutisServer(tools: AcutisTool[]) {
   });
 }
 
+/** The SDK's per-model totals, reduced to plain numbers (what the context-size comparison needs). */
+function modelUsage(u: unknown): NonNullable<Extract<AgentEvent, { kind: "agent.result" }>["model_usage"]> | undefined {
+  if (!u || typeof u !== "object") return undefined;
+  const out: NonNullable<Extract<AgentEvent, { kind: "agent.result" }>["model_usage"]> = {};
+  for (const [model, v] of Object.entries(u as Record<string, any>)) {
+    out[model] = {
+      inputTokens: Number(v?.inputTokens ?? 0),
+      outputTokens: Number(v?.outputTokens ?? 0),
+      cacheReadInputTokens: Number(v?.cacheReadInputTokens ?? 0),
+      cacheCreationInputTokens: Number(v?.cacheCreationInputTokens ?? 0),
+      costUSD: Number(v?.costUSD ?? 0),
+    };
+  }
+  return out;
+}
+
 function stringifyToolResult(content: unknown): string {
   let s: string;
   if (typeof content === "string") s = content;
@@ -259,6 +275,7 @@ class ClaudeSdkSession implements AgentSession {
           turns: Number(msg.num_turns ?? 0),
           duration_ms: Number(msg.duration_ms ?? 0),
           errors: Array.isArray(msg.errors) ? msg.errors.map(String) : undefined,
+          model_usage: modelUsage((msg as any).modelUsage),
         };
         return;
     }
