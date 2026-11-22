@@ -70,6 +70,19 @@ import type {
 } from "./types";
 import { ACTIVE_STATES, NOTICED_KINDS, SLOT_STATES, TERMINAL_STATES } from "./types";
 import { WORKFLOW_PATH, defaultWorkflow, describeGate, parseWorkflow, renderTemplate, workerSystemPrompt } from "./workflow";
+import {
+  type DraftView,
+  MAX_DRAFT_BODY,
+  MAX_WRITER_QUESTIONS,
+  WRITER_ROUND_BUDGET_USD,
+  WRITER_RUN_SOURCE,
+  WRITER_SOURCE,
+  answersMessage,
+  draftView,
+  isWriterRunner,
+  writerBrief,
+  writerSystemPrompt,
+} from "./writer";
 
 export class RunError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -120,6 +133,10 @@ interface Active {
   scoutTickets: number;
   scoutDecisions: number;
   budgetStop: boolean;
+  /** Writer runs: spend when the current round began, questions asked this round, whether it was reminded to save a draft. */
+  roundStartCost?: number;
+  writerQuestions?: number;
+  writerNudged?: boolean;
   /** Background tasks (e.g. subagents) the session reports running, and whether a finished turn waits on them. */
   background: number;
   awaitingBackground: boolean;
@@ -332,10 +349,14 @@ export class RunManager {
     return Boolean(this.active.get(runId)?.session);
   }
 
-  async start(ticketId: number, opts: { wokenBy?: string } = {}): Promise<Run> {
+  async start(ticketId: number, opts: { wokenBy?: string; writer?: boolean } = {}): Promise<Run> {
     const { store, tickets, hub } = this.deps;
     const ticket = tickets.get(ticketId);
     if (!ticket) throw new RunError(`ticket #${ticketId} not found`, 404);
+    // A draft's own ticket holds the operator's raw request: only the writer runs on it.
+    if (isWriterRunner(ticket) !== Boolean(opts.writer)) {
+      throw new RunError(opts.writer ? `ticket #${ticketId} is not a draft` : `ticket #${ticketId} is a draft's own ticket; save the draft to get a ticket you can start`, 409);
+    }
     const repo = store.getRepo(ticket.repo);
     if (!repo) throw new RunError(`repo "${ticket.repo}" is not registered`, 404);
     if (!tickets.claim(ticketId)) throw new RunError(`ticket #${ticketId} is not in "todo"`, 409);
@@ -351,7 +372,7 @@ export class RunManager {
       ticket_id: ticketId,
       repo: repo.name,
       state: queued ? "queued" : "preparing",
-      kind: scout ? "scout" : "work",
+      kind: scout ? "scout" : opts.writer ? "writer" : "work",
       scout,
       woken_by: scout ? (opts.wokenBy ?? null) : null,
     });
@@ -464,6 +485,13 @@ export class RunManager {
     if (this.mustGet(run.id).state !== "preparing") return;
 
     const alive = () => this.mustGet(run.id).state === "preparing";
+    if (run.kind === "writer") {
+      // No setup steps or checks: the writer only reads, and the operator is waiting in a form.
+      await this.selectLessons(run.id, a, ticket.body);
+      if (!alive()) return;
+      this.launch(run.id, writerBrief(ticket.body, this.workSnapshot(repo.name)));
+      return;
+    }
     const scout = run.kind === "scout" ? run.scout! : null;
     const settings = scout ? scoutSettings(workflow, scout) : null;
     if (scout && !settings) throw new Error(`the ${scout} scout is turned off for this repo (${workflow.source})`);
@@ -661,7 +689,7 @@ export class RunManager {
     const have = this.library.summarizedRuns(repo);
     const fresh: RunSummary[] = this.deps.store
       .listRuns(1000)
-      .filter((r) => r.repo === repo && r.state === "done" && r.kind !== "scout" && !have.has(r.id))
+      .filter((r) => r.repo === repo && r.state === "done" && r.kind === "work" && !have.has(r.id))
       .slice(0, 50)
       .map((r) => {
         const ticket = this.deps.tickets.get(r.ticket_id);
@@ -773,7 +801,27 @@ export class RunManager {
     const lessons = a.lessons;
     const scout = run.kind === "scout" ? run.scout! : null;
     const settings = scout ? scoutSettings(a.workflow, scout) : null;
-    const systemAppend = scout
+    const writer = run.kind === "writer";
+    if (writer) {
+      a.roundStartCost = run.cost_usd;
+      a.writerQuestions = 0;
+      a.writerNudged = false;
+      a.budgetStop = false;
+    }
+    const librarian = Boolean(a.workflow.library && a.workflow.library.librarian && this.deps.oneShot);
+    const systemAppend = writer
+      ? writerSystemPrompt({
+          repo: a.repo.name,
+          cwd: a.ws.path,
+          commit: a.ws.baseCommit,
+          workflow: a.workflow,
+          sandboxed: Boolean(this.deps.agentSandboxed),
+          library: Boolean(a.workflow.library),
+          librarian,
+          decisions,
+          lessons,
+        })
+      : scout
       ? scoutSystemPrompt({
           type: scout,
           repo: a.repo.name,
@@ -806,11 +854,17 @@ export class RunManager {
       model: a.workflow.model,
       effort: a.workflow.effort,
       allow: a.workflow.allow,
-      deny: a.workflow.deny,
+      // The writer only reads: its edits would go nowhere, and it isn't there to do the work.
+      deny: writer ? [...a.workflow.deny, "Edit", "Write", "MultiEdit", "NotebookEdit"] : a.workflow.deny,
       resumeSessionId,
-      tools: scout ? this.scoutTools(runId, scout) : this.agentTools(runId),
+      tools: writer ? this.writerTools(runId) : scout ? this.scoutTools(runId, scout) : this.agentTools(runId),
       // A hard backstop under the live-cost stop: the SDK ends the turn at what's left of the budget.
-      maxBudgetUsd: scout ? Math.max(0.05, (settings?.budget_usd ?? DEFAULT_SCOUT_BUDGET_USD) - run.cost_usd) : undefined,
+      // A writer's budget is per round; a resumed session's total may include earlier rounds.
+      maxBudgetUsd: writer
+        ? WRITER_ROUND_BUDGET_USD + (resumeSessionId ? (run.session_cost ?? run.cost_usd) : 0)
+        : scout
+          ? Math.max(0.05, (settings?.budget_usd ?? DEFAULT_SCOUT_BUDGET_USD) - run.cost_usd)
+          : undefined,
       onPermission: (req) => this.requestPermission(runId, req),
     });
     a.session = session;
@@ -879,6 +933,8 @@ export class RunManager {
             }
           } else if (ev.subtype === "error_max_budget_usd" && this.mustGet(runId).kind === "scout") {
             this.finishScout(runId, `stopped at its budget; ${this.scoutTally(a)}`);
+          } else if (ev.subtype === "error_max_budget_usd" && this.mustGet(runId).kind === "writer") {
+            this.restWriter(runId, a, "budget");
           } else {
             this.closeSession(a);
             this.fail(runId, new Error(`agent ended with "${ev.subtype}"${ev.errors?.length ? `: ${ev.errors.join("; ")}` : ""}`));
@@ -917,7 +973,9 @@ export class RunManager {
 
   /** What follows a successful turn: a scout finishes (nothing lands); a worker's work is checked. */
   private async turnSucceeded(runId: number, a: Active) {
-    if (this.mustGet(runId).kind === "scout") this.finishScout(runId, this.scoutTally(a));
+    const kind = this.mustGet(runId).kind;
+    if (kind === "scout") this.finishScout(runId, this.scoutTally(a));
+    else if (kind === "writer") this.restWriter(runId, a, "turn");
     else await this.verify(runId);
   }
 
@@ -969,6 +1027,12 @@ export class RunManager {
     if (delta > 0 || kind === "result") this.deps.hub.run(updated);
     // A scout over budget mid-turn is finished there; what it filed is already saved. (At a turn
     // result it finishes anyway.) Best effort: polls only happen while the agent emits events.
+    if (run.kind === "writer" && kind === "poll" && !a.budgetStop && a.session && updated.cost_usd >= (a.roundStartCost ?? 0) + WRITER_ROUND_BUDGET_USD) {
+      a.budgetStop = true;
+      queueMicrotask(() => {
+        if (this.active.get(runId) === a && a.session && this.mustGet(runId).state === "running") this.restWriter(runId, a, "budget");
+      });
+    }
     if (run.kind === "scout" && kind === "poll" && !a.budgetStop && a.session) {
       const budget = scoutSettings(a.workflow, run.scout!)?.budget_usd ?? DEFAULT_SCOUT_BUDGET_USD;
       if (updated.cost_usd >= budget) {
@@ -2036,6 +2100,206 @@ export class RunManager {
     return run;
   }
 
+  // ------------------------------------------------------------ the ticket writer
+
+  /** Start drafting a ticket from the operator's rough request. Each draft has its own hidden ticket. */
+  async startDraft(repoName: string, prompt: string): Promise<Run> {
+    if (!this.deps.store.getRepo(repoName)) throw new RunError(`repo "${repoName}" is not registered`, 404);
+    const text = clip(prompt, 8000);
+    if (!text) throw new RunError("say what the ticket should be about");
+    const ticket = this.deps.tickets.create({
+      repo: repoName,
+      title: `Draft: ${clip(text.split("\n")[0]!, 80)}`,
+      body: text,
+      source: WRITER_RUN_SOURCE,
+    });
+    const run = await this.start(ticket.id, { writer: true });
+    this.deps.hub.emit(run.id, "writer.started", { prompt: text });
+    return run;
+  }
+
+  private mustWriter(runId: number): Run {
+    const run = this.mustGet(runId);
+    if (run.kind !== "writer") throw new RunError(`run ${runId} is not a ticket draft`, 400);
+    return run;
+  }
+
+  draft(runId: number): DraftView & { run: Run } {
+    const run = this.mustWriter(runId);
+    return { ...draftView(runId, run.repo, this.deps.store.events(runId)), run };
+  }
+
+  /** Drafts still open (not saved or discarded), newest first. */
+  listDrafts(): (DraftView & { run: Run })[] {
+    return this.deps.store
+      .listRuns(1000)
+      .filter((r) => r.kind === "writer" && r.state !== "done" && r.state !== "cancelled")
+      .sort((x, y) => y.id - x.id)
+      .map((r) => this.draft(r.id));
+  }
+
+  /**
+   * End of a writer's turn (or its budget): it rests, paused, until the operator answers, asks for
+   * a revision or saves. A turn that saved no draft at all is reminded once first.
+   */
+  private restWriter(runId: number, a: Active, why: "turn" | "budget") {
+    const view = draftView(runId, a.repo.name, this.deps.store.events(runId));
+    if (why === "turn" && !view.draft && !a.writerNudged && a.session) {
+      a.writerNudged = true;
+      this.deps.hub.emit(runId, "user.message", { text: "(no draft saved yet)", mode: "message", by: "acutis" });
+      a.session.send("You ended your turn without saving a draft. Call mcp__acutis__write_draft now with your best draft (mark open points as assumptions), then stop.");
+      return;
+    }
+    this.closeSession(a);
+    if (this.mustGet(runId).state !== "running") return;
+    const reason =
+      why === "budget"
+        ? `stopped at this round's budget ($${WRITER_ROUND_BUDGET_USD.toFixed(2)})${view.draft ? "; the last draft is kept" : " before saving a draft"}`
+        : view.questions.length
+          ? `draft ready with ${view.questions.length} question(s) for you`
+          : view.draft
+            ? "draft ready"
+            : "finished without a draft";
+    this.setState(runId, "paused", reason);
+    this.deps.hub.emit(runId, "writer.ready", { questions: view.questions.length, draft: Boolean(view.draft), budget: why === "budget" });
+  }
+
+  /**
+   * The operator's answers and/or a note on the draft: the writer continues the same session.
+   * An answer marked `decide` is also kept as a repo decision every later agent follows.
+   */
+  async answerDraft(runId: number, input: { answers?: { n: number; answer: string; decide?: boolean }[]; note?: string }): Promise<Run> {
+    const run = this.mustWriter(runId);
+    if (run.state !== "paused" && run.state !== "failed") throw new RunError(`wait for the writer to finish its turn (it is ${run.state})`, 409);
+    const view = draftView(runId, run.repo, this.deps.store.events(runId));
+    if (view.saved) throw new RunError(`this draft was saved as ticket #${view.saved.ticket_id}`, 409);
+    const answers = new Map<number, string>();
+    const decide: string[] = [];
+    for (const x of input.answers ?? []) {
+      const q = view.questions.find((q) => q.n === Number(x.n));
+      const text = clip(x.answer, 2000);
+      if (!q || !text) continue;
+      answers.set(q.n, text);
+      if (x.decide) decide.push(`${q.question} ${text}`);
+    }
+    const note = clip(input.note, 4000);
+    if (!answers.size && !note) throw new RunError("answer a question or write a note");
+    for (const d of decide) this.addDecision(run.repo, d, "writer");
+    // Every round starts in launch (a session still open after Stop is closed and resumed), which
+    // gives it its own budget, SDK spend cap and question limit.
+    const a = this.active.get(runId);
+    if (a?.session) this.closeSession(a);
+    this.deps.hub.emit(runId, "writer.answered", { answers: [...answers].map(([n, answer]) => ({ n, answer })), note, decisions: decide.length });
+    await this.message(runId, answersMessage(view.questions, answers, note));
+    return this.mustGet(runId);
+  }
+
+  /**
+   * Save the draft as an ordinary ticket (the operator's edits win), end the writer and remove its
+   * workspace; optionally start a worker on the new ticket. Once only: the check and the save
+   * happen with no await between them.
+   */
+  async saveDraft(runId: number, input: { title?: string; body?: string; start?: boolean }): Promise<{ ticket: Ticket; run?: Run }> {
+    const run = this.mustWriter(runId);
+    if (run.state === "queued" || run.state === "preparing" || run.state === "running") {
+      throw new RunError(`wait for the writer to finish its turn, or stop it first (it is ${run.state})`, 409);
+    }
+    if (run.state === "cancelled") throw new RunError("this draft was discarded", 409);
+    const view = draftView(runId, run.repo, this.deps.store.events(runId));
+    if (view.saved) throw new RunError(`already saved as ticket #${view.saved.ticket_id}`, 409);
+    const title = clip((input.title ?? view.draft?.title ?? "").replace(/\s+/g, " "), 200);
+    const body = clip(input.body ?? view.draft?.body ?? "", MAX_DRAFT_BODY);
+    if (!title) throw new RunError("the ticket needs a title");
+    const ticket = this.deps.tickets.create({ repo: run.repo, title, body, source: WRITER_SOURCE });
+    this.deps.hub.ticket(ticket);
+    this.deps.hub.emit(runId, "writer.saved", { ticket_id: ticket.id, edited: Boolean(view.draft && (title !== view.draft.title || body !== view.draft.body)) });
+    const a = this.active.get(runId);
+    if (a) this.closeSession(a);
+    this.active.delete(runId);
+    this.setState(runId, "done", `saved as ticket #${ticket.id}`); // removes the scratch workspace
+    this.deps.hub.ticket(this.deps.tickets.setStatus(run.ticket_id, "done"));
+    return { ticket, run: input.start ? await this.start(ticket.id) : undefined };
+  }
+
+  /** Throw a draft away: stop the writer if it is working and remove its workspace. */
+  async closeDraft(runId: number): Promise<Run> {
+    const run = this.mustWriter(runId);
+    if (run.state === "done" || run.state === "cancelled") return run;
+    if (ACTIVE_STATES.includes(run.state)) await this.kill(runId);
+    else {
+      this.active.delete(runId);
+      this.setState(runId, "cancelled", "draft discarded"); // removes the scratch workspace
+    }
+    this.deps.hub.ticket(this.deps.tickets.setStatus(run.ticket_id, "cancelled"));
+    return this.mustGet(runId);
+  }
+
+  private writerTools(runId: number): AcutisTool[] {
+    const a = () => {
+      const x = this.active.get(runId);
+      if (!x) throw new Error("run is not active");
+      return x;
+    };
+    const wf = this.active.get(runId)?.workflow;
+    const tools: AcutisTool[] = wf?.library ? this.libraryTools(runId, a) : [];
+    tools.push(
+      {
+        name: "list_work",
+        description: "List the repo's existing tickets (with status), open noticed reports and open questions, to spot duplicates and related work.",
+        params: {},
+        handler: async () => ({ text: this.workSnapshot(a().repo.name) }),
+      },
+      {
+        name: "ask_user",
+        description:
+          "Record one question for the operator; they answer after your turn ends, so don't wait. Only for what they alone can decide (intent, scope, priorities, the behaviour or look they want), never facts in the repo.",
+        params: {
+          question: { type: "string", description: "One question, answerable in a sentence." },
+          options: { type: "string", description: 'Two to four suggested answers, separated by " | ".', optional: true },
+          why: { type: "string", description: "What in the ticket depends on the answer, in a sentence.", optional: true },
+        },
+        handler: async (args): Promise<ToolOutput> => {
+          const x = a();
+          const question = clip(String(args.question ?? "").replace(/\s+/g, " "), 500);
+          if (!question) return { text: "question is empty", isError: true };
+          if ((x.writerQuestions ?? 0) >= MAX_WRITER_QUESTIONS) {
+            return { text: `That's ${MAX_WRITER_QUESTIONS} questions this round, the limit. Write the draft with the rest as assumptions.`, isError: true };
+          }
+          x.writerQuestions = (x.writerQuestions ?? 0) + 1;
+          const asked = draftView(runId, x.repo.name, this.deps.store.events(runId)).questions;
+          const n = asked.length ? Math.max(...asked.map((q) => q.n)) + 1 : 1;
+          const options = String(args.options ?? "")
+            .split("|")
+            .map((o) => clip(o.trim(), 200))
+            .filter(Boolean)
+            .slice(0, 5);
+          this.deps.hub.emit(runId, "writer.question", { n, question, options, why: clip(args.why, 300) });
+          return { text: `Recorded as Q${n}. Don't wait for the answer: carry on, and write the draft with this as a stated assumption.` };
+        },
+      },
+      {
+        name: "write_draft",
+        description: "Save the ticket draft (title and markdown body). Call it before you finish, and again whenever you revise; only the latest counts.",
+        params: {
+          title: { type: "string", description: "One line, imperative: what to do." },
+          body: { type: "string", description: "Markdown: Context, What to change, Acceptance criteria, Out of scope, Notes." },
+        },
+        handler: async (args): Promise<ToolOutput> => {
+          const x = a();
+          const title = clip(String(args.title ?? "").replace(/\s+/g, " "), 200);
+          const body = String(args.body ?? "").trim();
+          if (!title || !body) return { text: "both title and body are needed", isError: true };
+          if (body.length > MAX_DRAFT_BODY) return { text: `The body is ${body.length} characters; keep it under ${MAX_DRAFT_BODY}.`, isError: true };
+          const prev = draftView(runId, x.repo.name, this.deps.store.events(runId)).draft;
+          const version = (prev?.version ?? 0) + 1;
+          this.deps.hub.emit(runId, "writer.draft", { title, body, version });
+          return { text: `Draft v${version} saved. If you're done, end your turn with one line.` };
+        },
+      },
+    );
+    return tools;
+  }
+
   // ------------------------------------------------------------ trunk triggers
 
   private triggerChains = new Map<string, Promise<unknown>>();
@@ -2589,7 +2853,7 @@ ${this.workSnapshot(repo)}${gapList}`;
   async resume(runId: number) {
     const run = this.mustGet(runId);
     if (run.state !== "paused") throw new RunError(`can't resume a run that is ${run.state}`, 409);
-    await this.message(runId, "Continue working on the ticket.");
+    await this.message(runId, run.kind === "writer" ? "Continue writing the draft, then save it with mcp__acutis__write_draft." : "Continue working on the ticket.");
   }
 
   /** Queue a message. If the session is not live, resume it with this message. */
@@ -2662,6 +2926,7 @@ ${this.workSnapshot(repo)}${gapList}`;
    */
   async approve(runId: number, opts: { acceptContracts?: boolean } = {}): Promise<{ landed: boolean; reason?: string }> {
     const run = this.mustGet(runId);
+    if (run.kind !== "work") throw new RunError(`a ${run.kind} run lands nothing`, 409);
     if (run.state !== "awaiting_review") throw new RunError(`can't approve a run that is ${run.state}`, 409);
     // Checking contracts awaits jj before the run is marked landing: a second approve (a double
     // click) must not slip into that gap.
@@ -2844,7 +3109,7 @@ ${this.workSnapshot(repo)}${gapList}`;
   private noticeContractChange(byRun: number, repo: string, contracts: string[]) {
     const live = new Set(["preparing", "running", "paused", "verifying", "awaiting_review"]);
     for (const r of this.deps.store.listRuns(1000)) {
-      if (r.id === byRun || r.repo !== repo || r.kind === "scout" || !live.has(r.state)) continue;
+      if (r.id === byRun || r.repo !== repo || r.kind !== "work" || !live.has(r.state)) continue;
       this.deps.hub.emit(r.id, "contract.stale", {
         contracts,
         by_run: byRun,
@@ -2916,7 +3181,8 @@ ${this.workSnapshot(repo)}${gapList}`;
     if (TERMINAL_STATES.includes(to)) {
       this.previews.stop(runId);
       // A scout's workspace is scratch: nothing to review or land, so it goes whatever the ending.
-      if (run.kind === "scout" && run.workspace_path) this.removeScratch(run);
+      // A writer's too, except when it failed: an answer can still continue the session there.
+      if ((run.kind === "scout" || (run.kind === "writer" && to !== "failed")) && run.workspace_path) this.removeScratch(run);
     }
     this.deps.hub.emit(runId, "run.state", { from, to, reason });
     this.deps.hub.run(run);

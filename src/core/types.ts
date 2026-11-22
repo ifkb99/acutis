@@ -19,7 +19,7 @@ export interface Ticket {
   title: string;
   body: string;
   status: TicketStatus;
-  /** "local"; "scout:<type>" for a ticket a scout filed; "scout-run:<type>" for a scout's own (hidden) runner ticket. */
+  /** "local"; "scout:<type>" for a ticket a scout filed; "scout-run:<type>" for a scout's own (hidden) runner ticket; "writer" for a ticket saved from the ticket writer; "writer-run" for a draft's own (hidden) ticket. */
   source: string;
   /** A scout's confidence in a ticket it filed. */
   confidence: "high" | "medium" | "low" | null;
@@ -53,8 +53,8 @@ export interface Run {
   id: number;
   ticket_id: number;
   repo: string;
-  /** work: a worker on a ticket (lands after review). scout: finds work, files tickets and decisions, lands nothing. */
-  kind: "work" | "scout";
+  /** work: a worker on a ticket (lands after review). scout: finds work, files tickets and decisions, lands nothing. writer: drafts a ticket from the operator's request, lands nothing. */
+  kind: "work" | "scout" | "writer";
   /** The scout type, for scout runs. */
   scout: string | null;
   /** For a scout woken by a trunk change: JSON { from, to, paths }. */

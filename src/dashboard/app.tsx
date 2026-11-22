@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client";
 import { isRunnerTicket } from "../core/scouts";
 import type { Decision, Lesson, Noticed, Repo, Run, RunEvent, Ticket, PermissionRequest } from "../core/types";
+import type { DraftView } from "../core/writer";
 import { Markdown } from "./markdown";
 
 // ------------------------------------------------------------------- api
@@ -120,6 +121,8 @@ function App() {
   const [scoutTypes, setScoutTypes] = useState<ScoutTypeInfo[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const loadLessons = useCallback(() => api<Lesson[]>("/api/lessons").then(setLessons).catch(() => {}), []);
+  const [drafts, setDrafts] = useState<Draft[]>([]);
+  const loadDrafts = useCallback(() => api<Draft[]>("/api/drafts").then(setDrafts).catch(() => {}), []);
   const loadDecisions = useCallback(
     () =>
       Promise.all([api<RankedDecision[]>("/api/decisions"), api<Decision[]>("/api/decisions?status=decided")])
@@ -139,8 +142,8 @@ function App() {
     setSandboxReason(s.sandboxReason);
     setPending(new Map((s.permissions ?? []).map((p: { runId: number; req: PermissionRequest }) => [p.req.id, p.runId])));
     setScoutTypes(s.scoutTypes ?? []);
-    await Promise.all([loadNoticed(), loadDecisions(), loadLessons()]);
-  }, [loadNoticed, loadDecisions, loadLessons]);
+    await Promise.all([loadNoticed(), loadDecisions(), loadLessons(), loadDrafts()]);
+  }, [loadNoticed, loadDecisions, loadLessons, loadDrafts]);
 
   useEffect(() => {
     if (!token) return; // nothing to ask with; the sign-in screen is already showing
@@ -166,12 +169,16 @@ function App() {
 
   const connected = useHub((m) => {
     if (m.type === "ticket") setTickets((prev) => new Map(prev).set(m.ticket.id, m.ticket));
-    else if (m.type === "run") setRuns((prev) => new Map(prev).set(m.run.id, m.run));
+    else if (m.type === "run") {
+      setRuns((prev) => new Map(prev).set(m.run.id, m.run));
+      if (m.run.kind === "writer") loadDrafts();
+    }
     else if (m.type === "event") {
       const e = m.event;
       if (e.kind === "noticed") loadNoticed();
       if (e.kind.startsWith("scout.")) loadDecisions();
       if (e.kind === "lesson.proposed" || e.kind === "lesson.stale") loadLessons();
+      if (e.kind.startsWith("writer.")) loadDrafts();
       if (e.kind === "permission.request") setPending((p) => new Map(p).set((e.data as any).id, e.run_id));
       else if (e.kind === "permission.decision") {
         setPending((p) => {
@@ -253,7 +260,37 @@ function App() {
             )}
           </div>
         </div>
-        <NewTicket repos={repos} onCreate={(t) => setTickets((prev) => new Map(prev).set(t.id, t))} onError={setError} />
+        <NewTicket
+          repos={repos}
+          onCreate={(t) => setTickets((prev) => new Map(prev).set(t.id, t))}
+          onDraft={(repo, prompt) =>
+            act(async () => {
+              await api<Run>("/api/drafts", "POST", { repo, prompt });
+              await loadDrafts();
+            })
+          }
+          onError={setError}
+        />
+        <DraftsPanel
+          drafts={drafts}
+          onOpenRun={(id) => setSelected(id)}
+          onAct={(id, action, payload) =>
+            act(async () => {
+              if (action === "continue") await api(`/api/runs/${id}/resume`, "POST");
+              else {
+                const out = await api(`/api/drafts/${id}/${action}`, "POST", payload);
+                if (action === "save") {
+                  setTickets((prev) => new Map(prev).set(out.ticket.id, out.ticket));
+                  if (out.run) {
+                    setRuns((prev) => new Map(prev).set(out.run.id, out.run));
+                    setSelected(out.run.id);
+                  }
+                }
+              }
+              await loadDrafts();
+            })
+          }
+        />
         <NoticedPanel
           items={noticed}
           onTicket={(id) =>
@@ -393,7 +430,17 @@ function App() {
   );
 }
 
-function NewTicket({ repos, onCreate, onError }: { repos: Repo[]; onCreate: (t: Ticket) => void; onError: (s: string) => void }) {
+function NewTicket({
+  repos,
+  onCreate,
+  onDraft,
+  onError,
+}: {
+  repos: Repo[];
+  onCreate: (t: Ticket) => void;
+  onDraft: (repo: string, prompt: string) => Promise<void>;
+  onError: (s: string) => void;
+}) {
   const [repo, setRepo] = useState("");
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -423,10 +470,209 @@ function NewTicket({ repos, onCreate, onError }: { repos: Repo[]; onCreate: (t: 
         <input placeholder="New ticket title" value={title} onChange={(e) => setTitle(e.target.value)} />
       </div>
       <textarea placeholder="Description, acceptance criteria…" value={body} onChange={(e) => setBody(e.target.value)} />
-      <button className="btn" disabled={!title.trim()}>
-        Add ticket
-      </button>
+      <div className="row">
+        <button className="btn" disabled={!title.trim()}>
+          Add ticket
+        </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={!(title.trim() || body.trim())}
+          title="The ticket writer reads the repo and turns this into a full ticket, asking you what only you can decide"
+          onClick={async () => {
+            await onDraft(repo, [title.trim(), body.trim()].filter(Boolean).join("\n\n"));
+            setTitle("");
+            setBody("");
+          }}
+        >
+          Draft with agent
+        </button>
+      </div>
     </form>
+  );
+}
+
+type Draft = DraftView & { run: Run };
+type DraftAction = "answer" | "save" | "stop" | "discard" | "continue";
+
+/** Ticket drafts the writer is working on or waiting with: answer its questions, edit, save. */
+function DraftsPanel({ drafts, onAct, onOpenRun }: { drafts: Draft[]; onAct: (id: number, action: DraftAction, body?: unknown) => void; onOpenRun: (runId: number) => void }) {
+  if (!drafts.length) return null;
+  return (
+    <details className="col drafts" open>
+      <summary>
+        <h2 title="The ticket writer reads the repo at trunk and drafts a ticket from your request, asking what only you can decide. Nothing it does lands.">
+          Drafts · {drafts.length}
+        </h2>
+      </summary>
+      {drafts.map((d) => (
+        <DraftCard key={d.run_id} d={d} onAct={onAct} onOpenRun={onOpenRun} />
+      ))}
+    </details>
+  );
+}
+
+function DraftCard({ d, onAct, onOpenRun }: { d: Draft; onAct: (id: number, action: DraftAction, body?: unknown) => void; onOpenRun: (runId: number) => void }) {
+  const busy = ["queued", "preparing", "running"].includes(d.run.state);
+  const [title, setTitle] = useState(d.draft?.title ?? "");
+  const [body, setBody] = useState(d.draft?.body ?? "");
+  const [editing, setEditing] = useState(false);
+  // The version loaded into the fields. Your edits (fields differing from it) are kept when the
+  // writer revises; untouched fields follow the latest version.
+  const [base, setBase] = useState(d.draft ?? null);
+  const shown = base?.version ?? 0;
+  const edited = Boolean(base) && (title !== base!.title || body !== base!.body);
+  const load = (v: NonNullable<Draft["draft"]>) => {
+    setTitle(v.title);
+    setBody(v.body);
+    setBase(v);
+  };
+  useEffect(() => {
+    if (d.draft && d.draft.version !== shown && !edited) load(d.draft);
+  }, [d.draft?.version]);
+  const takeLatest = () => load(d.draft!);
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [decide, setDecide] = useState<Record<number, boolean>>({});
+  const [note, setNote] = useState("");
+  const round = d.questions.map((q) => `${q.n}:${q.question}`).join("|");
+  useEffect(() => {
+    setAnswers({});
+    setDecide({});
+  }, [round]);
+  const status = busy
+    ? d.run.state === "queued"
+      ? "queued"
+      : "writing…"
+    : d.run.state === "failed"
+      ? "failed"
+      : d.questions.length
+        ? `${d.questions.length} question${d.questions.length > 1 ? "s" : ""} for you`
+        : d.draft
+          ? "ready"
+          : "stopped";
+  const chip = busy ? d.run.state : d.run.state === "failed" ? "failed" : d.questions.length ? "awaiting_review" : "done";
+  const canSend = !busy && (note.trim() || Object.values(answers).some((a) => a.trim()));
+  const send = () => {
+    onAct(d.run_id, "answer", {
+      answers: d.questions.map((q) => ({ n: q.n, answer: answers[q.n] ?? "", decide: Boolean(decide[q.n]) })).filter((a) => a.answer.trim()),
+      note,
+    });
+    setNote("");
+  };
+  return (
+    <div className="card draft-item">
+      <div className="row">
+        <span className={`chip ${chip}`}>{status}</span>
+        <span className="muted">
+          {d.repo} ·{" "}
+          <a href={`#run-${d.run_id}`} onClick={() => onOpenRun(d.run_id)} title="The writer's run: what it read, and its cost">
+            run {d.run_id}
+          </a>{" "}
+          · ≈${d.run.cost_usd.toFixed(2)}
+        </span>
+      </div>
+      <div className="muted draft-prompt" title={d.prompt}>
+        You asked: {d.prompt.length > 160 ? `${d.prompt.slice(0, 160)}…` : d.prompt}
+      </div>
+      {d.run.state === "failed" && d.run.error && <div className="detail err">{d.run.error}</div>}
+      {busy && !d.draft && <div className="muted">Reading the repo{d.run.state === "queued" ? " once a run slot is free" : ""}…</div>}
+
+      {d.questions.length > 0 && (
+        <div className="draft-questions">
+          {d.questions.map((q) => (
+            <div className="draft-q" key={q.n}>
+              <div className="title">
+                Q{q.n}. {q.question}
+              </div>
+              {q.why && <div className="muted">{q.why}</div>}
+              {q.options.length > 0 && (
+                <div className="row">
+                  {q.options.map((o) => (
+                    <button key={o} className={`btn sm ${answers[q.n] === o ? "primary" : ""}`} disabled={busy} onClick={() => setAnswers((a) => ({ ...a, [q.n]: o }))}>
+                      {o}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <input placeholder="Your answer" value={answers[q.n] ?? ""} disabled={busy} onChange={(e) => setAnswers((a) => ({ ...a, [q.n]: e.target.value }))} />
+              <label className="muted" title="Kept as an operator decision that every later worker, scout and writer on this repo follows">
+                <input type="checkbox" checked={Boolean(decide[q.n])} disabled={busy} onChange={(e) => setDecide((x) => ({ ...x, [q.n]: e.target.checked }))} /> Save as a repo decision
+              </label>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {d.draft && (
+        <div className="draft-body">
+          {edited && d.draft.version !== shown && (
+            <div className="row muted">
+              The writer wrote v{d.draft.version}; you have edits on v{shown}.
+              <button className="btn sm" onClick={takeLatest}>
+                Use v{d.draft.version}
+              </button>
+            </div>
+          )}
+          <input className="draft-title" value={title} onChange={(e) => setTitle(e.target.value)} aria-label="Ticket title" />
+          {editing ? (
+            <textarea value={body} rows={14} onChange={(e) => setBody(e.target.value)} aria-label="Ticket body" />
+          ) : (
+            <div className="draft-md">
+              <Markdown text={body} />
+            </div>
+          )}
+          <div className="row">
+            <button className="btn sm" onClick={() => setEditing((x) => !x)}>
+              {editing ? "Preview" : "Edit"}
+            </button>
+            <span className="muted">v{shown}{edited ? " · edited" : ""}</span>
+          </div>
+        </div>
+      )}
+
+      {!busy && (
+        <textarea
+          className="draft-note"
+          placeholder={d.questions.length ? "Anything else for the writer (optional)" : "Ask for a revision, e.g. “split the tests into their own ticket”"}
+          value={note}
+          rows={2}
+          onChange={(e) => setNote(e.target.value)}
+        />
+      )}
+      <div className="row">
+        {busy ? (
+          <button className="btn" onClick={() => onAct(d.run_id, d.run.state === "running" ? "stop" : "discard")} title={d.run.state === "running" ? "Stop this turn; the draft so far is kept" : "Drop this draft"}>
+            {d.run.state === "running" ? "Stop" : "Discard"}
+          </button>
+        ) : (
+          <>
+            {(canSend || d.questions.length > 0) && (
+              <button className="btn draft-send" disabled={!canSend} onClick={send}>
+                {d.questions.length ? "Send answers" : "Revise"}
+              </button>
+            )}
+            {!canSend && !d.questions.length && !d.draft && (
+              <button className="btn" onClick={() => onAct(d.run_id, "continue")}>
+                Continue
+              </button>
+            )}
+            {d.draft && (
+              <>
+                <button className="btn primary" disabled={!title.trim()} onClick={() => onAct(d.run_id, "save", { title, body })} title="Add it to Todo">
+                  Save ticket
+                </button>
+                <button className="btn" disabled={!title.trim()} onClick={() => onAct(d.run_id, "save", { title, body, start: true })}>
+                  Save &amp; start
+                </button>
+              </>
+            )}
+            <button className="btn danger" onClick={() => onAct(d.run_id, "discard")}>
+              Discard
+            </button>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1250,6 +1496,36 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
           ⚠ Lesson L{d.id} needs a recheck: trunk changed <code>{(d.paths ?? []).join(", ")}</code>. It isn't given to runs until the operator confirms it.
         </div>
       );
+    case "writer.started":
+      return <div className="ev log">drafting a ticket for: {d.prompt}</div>;
+    case "writer.question":
+      return (
+        <div className="ev log">
+          asked Q{d.n}: {d.question}
+          {(d.options ?? []).length > 0 && ` [${(d.options as string[]).join(" | ")}]`}
+        </div>
+      );
+    case "writer.draft":
+      return (
+        <div className="ev log">
+          wrote draft v{d.version}: <b>{d.title}</b>
+          <details>
+            <summary>body</summary>
+            <Markdown text={d.body} />
+          </details>
+        </div>
+      );
+    case "writer.answered":
+      return (
+        <div className="ev log">
+          the operator answered {(d.answers ?? []).length} question(s){d.note ? " and left a note" : ""}
+          {d.decisions ? ` (${d.decisions} kept as repo decisions)` : ""}
+        </div>
+      );
+    case "writer.saved":
+      return <div className="ev log">saved as ticket #{d.ticket_id}{d.edited ? " (edited by the operator)" : ""}</div>;
+    case "writer.ready":
+      return null;
     case "lesson.proposed":
       return (
         <div className="ev log">
