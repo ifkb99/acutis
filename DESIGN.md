@@ -264,6 +264,18 @@ There are two separate questions: where the agent loop runs, and where the app r
   - When a contract-changing run lands, other live runs in the repo get a `contract.stale` notice: a dashboard flag
     only, no agent message, so nobody hand-applies a change their workspace doesn't have yet.
 
+- **Real run (2026-11-22)**, on a copy of duke-ml with an `engine-api` contract (the engine's public files;
+  ai, web and harness as consumers), real Opus workers, $1.04.
+  - Run A changed the contract on purpose (`findDukePosition` became `findDuke`, returning the tile, with every caller
+    updated). Run B, in parallel, added a minimax evaluation term. Both passed every check.
+  - Approving A without acceptance was refused, and with it A landed. B was flagged at once, then stopped at
+    landing, rebased and sent back with A's diff.
+  - B's resumed agent read the diff and correctly concluded nothing needed changing: it finds the Duke through
+    its own loop, and A had already moved the one AI caller. B was re-checked (all four gates again) and landed;
+    trunk has both commits in order.
+  - Neither worker called `request_contract_change`, and neither needed to. The run shows the agent reasoning
+    about a contract diff, not yet rewriting code for one.
+
 ### Phase 3 of the scouts plan (2026-11-21): more scouts, a better library, the librarian
 
 Ideas from reviewing anima-research's connectome-host and context-manager; see the plan doc.
