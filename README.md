@@ -69,6 +69,13 @@ Under the sandbox, things that need the network or write outside the repo
 (`bun install`, `npm ci`, `cargo fetch`) belong in the workflow's `setup:` steps,
 which run on the host before the agent starts.
 
+## Looking at the dashboard with demo data
+
+`PORT=7800 bun scripts/preview.ts` starts the dashboard with a throwaway home, scripted agents (no
+model calls) and demo data in every panel. Open `http://127.0.0.1:7800/#token=preview`. Acutis's
+own `.acutis/workflow.md` uses it as the preview, so workers on Acutis can screenshot their UI
+changes.
+
 ## Quick start
 
 ```sh
