@@ -273,6 +273,16 @@ only they can decide.
   continue it.
 - **Notification:** a ready draft is notified at once (`writer.ready`), not batched. It answers
   something the operator just asked for.
+- **Real run (2026-11-22, a clone of Acutis, $0.53).** The request: move drafts out of the cramped
+  sidebar into the main pane.
+  - **Round 1 ($0.43, 5 tool calls):** the writer saved a draft and ended its turn without the
+    reminder. It asked no questions: the request was clear, and it stated its assumptions instead.
+    The draft cites real `file:line` locations, keeps the edit-preserving behaviour, and names the
+    real trap, that a draft's id is also a run id, so selection needs a kind or a hash prefix.
+  - **Round 2 ($0.10):** a note asking for tighter acceptance criteria resumed the same session and
+    stayed under its spend cap. It produced v2, with criteria that can be checked by hand.
+  - **Budget:** most of round 1 was reading a 1,700-line `app.tsx`, so $0.50 per round may be tight
+    on bigger repos.
 
 ### Phase 5 real run (2026-11-22, duke-ml copy, $1.10)
 
