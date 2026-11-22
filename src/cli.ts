@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createApp, loadConfig } from "./app";
+import { isRunnerTicket } from "./core/scouts";
 import { readToken } from "./core/token";
 import { killAllBrowsers } from "./providers/browser/chrome";
 import { makeNotifier } from "./server/notify";
@@ -38,6 +39,16 @@ Scouts and decisions
                                                any others go to proposed
   acutis decision add <repo> <text>            Record a decision directly
   acutis decision withdraw <id> | supersede <id> <text>
+
+Ticket drafts (an agent reads the repo and writes a ticket from your request, asking what only you can decide)
+  acutis draft <repo> <request>                Start drafting a ticket
+  acutis drafts                                Drafts in progress or waiting for you
+  acutis draft show <run>                      The request, the writer's questions and its latest draft
+  acutis draft answer <run> [--a N=TEXT]... [--decide N]... [--note TEXT]
+                                               Answer questions (--decide: also keep the answer as a repo decision)
+                                               and/or ask for a revision; the writer continues
+  acutis draft save <run> [--start]            Save the latest draft as a todo ticket (--start: and start it)
+  acutis draft discard <run>
 
 Lessons (short how-tos approved lessons put in every worker's and scout's prompt)
   acutis lessons [--repo R] [--all]            Proposed lessons waiting for you, then approved ones (--all: every status)
@@ -100,6 +111,12 @@ async function api(path: string, init?: { method?: string; body?: unknown; raw?:
 }
 
 const post = (path: string, body?: unknown) => api(path, { method: "POST", body: body ?? {} });
+
+function printDraftLine(d: any) {
+  const busy = ["queued", "preparing", "running"].includes(d.run.state);
+  const status = busy ? (d.run.state === "queued" ? "queued" : "writing") : d.run.state === "failed" ? "failed" : d.questions.length ? `${d.questions.length} question(s) for you` : d.draft ? "ready" : "stopped";
+  console.log(`run ${d.run_id}\t${d.repo}\t${status}\t≈$${d.run.cost_usd.toFixed(2)}\t${d.draft ? d.draft.title : d.prompt.split("\n")[0].slice(0, 80)}`);
+}
 
 function runArg(v: string | undefined, usage: string): number {
   const n = Number(v);
@@ -262,6 +279,14 @@ function formatEvent(e: { id: number; kind: string; data: any }): string | null 
     case "contract.changed":
     case "contract.stale":
       return `⚠ ${d.msg}`;
+    case "writer.question":
+      return `  asked Q${d.n}: ${d.question}`;
+    case "writer.draft":
+      return `  wrote draft v${d.version}: ${d.title}`;
+    case "writer.answered":
+      return `  you answered ${(d.answers ?? []).length} question(s)${d.note ? " with a note" : ""}`;
+    case "writer.saved":
+      return `  saved as ticket #${d.ticket_id}`;
     case "lessons.given":
       return `  given ${(d.lessons ?? []).length} of ${d.of} approved lesson(s)${d.by === "all" ? "" : ` (chosen by ${d.by})`}`;
     case "lesson.stale":
@@ -465,7 +490,7 @@ switch (cmd) {
     } else if (sub === "ls") {
       const s = await api("/api/state");
       for (const t of s.tickets) {
-        if (String(t.source).startsWith("scout-run:")) continue; // a scout's own runner ticket
+        if (isRunnerTicket(t)) continue; // a scout's runner or a draft's own ticket
         console.log(`#${t.id}\t${t.status}\t${t.repo}\t${t.title}${t.source !== "local" ? `\t(${t.source}${t.confidence ? `, ${t.confidence}` : ""})` : ""}`);
       }
     } else if (sub === "cancel") {
@@ -543,6 +568,50 @@ switch (cmd) {
         console.log(`#${d.id}\t${d.status}\t${d.repo} · ${d.area}${d.question ? ` · ${d.question}` : ""}`);
         if (d.decision) console.log(`\t→ ${d.decision}${d.superseded_by ? ` (superseded by #${d.superseded_by})` : ""}`);
       }
+    }
+    break;
+  }
+  case "drafts": {
+    const all: any[] = await api("/api/drafts");
+    if (!all.length) console.log("No drafts in progress.");
+    for (const d of all) printDraftLine(d);
+    break;
+  }
+  case "draft": {
+    const usage = "acutis draft <repo> <request> | draft show|answer|save|discard <run>";
+    if (sub === "show") {
+      const d = await api(`/api/drafts/${runArg(rest[0], "acutis draft show <run>")}`);
+      printDraftLine(d);
+      console.log(`  asked: ${d.prompt}`);
+      for (const q of d.questions) {
+        console.log(`  Q${q.n}. ${q.question}${q.options.length ? `  [${q.options.join(" | ")}]` : ""}${q.why ? `\n      (${q.why})` : ""}`);
+      }
+      if (d.draft) console.log(`\n# ${d.draft.title}   (v${d.draft.version})\n\n${d.draft.body}`);
+    } else if (sub === "answer") {
+      const { values, positionals } = parseArgs({
+        args: rest,
+        allowPositionals: true,
+        options: { a: { type: "string", multiple: true }, decide: { type: "string", multiple: true }, note: { type: "string" } },
+      });
+      const id = runArg(positionals[0], "acutis draft answer <run> [--a N=TEXT]... [--decide N]... [--note TEXT]");
+      const decide = new Set((values.decide ?? []).map(Number));
+      const answers = (values.a ?? []).map((x) => {
+        const m = /^(\d+)=([\s\S]+)$/.exec(x) ?? die(`--a takes N=TEXT, got "${x}"`);
+        return { n: Number(m[1]), answer: m[2], decide: decide.has(Number(m[1])) };
+      });
+      const r = await post(`/api/drafts/${id}/answer`, { answers, note: values.note ?? "" });
+      console.log(`run ${r.id}: ${r.state}; the writer is revising (acutis draft show ${r.id})`);
+    } else if (sub === "save") {
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { start: { type: "boolean" } } });
+      const out = await post(`/api/drafts/${runArg(positionals[0], "acutis draft save <run> [--start]")}/save`, { start: Boolean(values.start) });
+      console.log(`#${out.ticket.id} ${out.ticket.title}${out.run ? `\nrun ${out.run.id} started` : ""}`);
+    } else if (sub === "discard") {
+      const r = await post(`/api/drafts/${runArg(rest[0], "acutis draft discard <run>")}/discard`);
+      console.log(`run ${r.id}: ${r.state}`);
+    } else {
+      if (!sub || !rest.length) die(`usage: ${usage}`);
+      const r = await post("/api/drafts", { repo: sub, prompt: rest.join(" ") });
+      console.log(`Drafting in run ${r.id}${r.state === "queued" ? " (queued for a run slot)" : ""}. See it with: acutis draft show ${r.id}`);
     }
     break;
   }

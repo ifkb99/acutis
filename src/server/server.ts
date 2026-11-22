@@ -115,6 +115,35 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
       "/api/decisions/:id/supersede": {
         POST: api(async (req) => runs.supersedeDecision(Number(req.params.id), String((await body(req)).decision ?? ""))),
       },
+      "/api/drafts": {
+        GET: api(() => runs.listDrafts()),
+        POST: api(async (req) => {
+          const b = await body(req);
+          return runs.startDraft(String(b.repo ?? ""), String(b.prompt ?? ""));
+        }),
+      },
+      "/api/drafts/:id": { GET: api((req) => runs.draft(Number(req.params.id))) },
+      "/api/drafts/:id/answer": {
+        POST: api(async (req) => {
+          const b = await body(req);
+          const answers = Array.isArray(b.answers)
+            ? b.answers.map((x: any) => ({ n: Number(x?.n), answer: String(x?.answer ?? ""), decide: x?.decide === true }))
+            : [];
+          return runs.answerDraft(Number(req.params.id), { answers, note: b.note ? String(b.note) : "" });
+        }),
+      },
+      "/api/drafts/:id/save": {
+        POST: api(async (req) => {
+          const b = await body(req);
+          return runs.saveDraft(Number(req.params.id), {
+            title: typeof b.title === "string" ? b.title : undefined,
+            body: typeof b.body === "string" ? b.body : undefined,
+            start: b.start === true,
+          });
+        }),
+      },
+      "/api/drafts/:id/stop": { POST: api((req) => (runs.draft(Number(req.params.id)), runs.pause(Number(req.params.id)))) },
+      "/api/drafts/:id/discard": { POST: api((req) => runs.closeDraft(Number(req.params.id))) },
       "/api/lessons": {
         GET: api((req) => {
           const q = new URL(req.url).searchParams;
@@ -186,7 +215,7 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
         POST: api((req) => {
           const t = tickets.get(Number(req.params.id));
           if (!t) throw new RunError("not found", 404);
-          if (isRunnerTicket(t)) throw new RunError("that's a scout's own ticket; turn the scout off in the workflow instead", 409);
+          if (isRunnerTicket(t)) throw new RunError("that's a run's own hidden ticket (a scout's or a draft's)", 409);
           if (t.status !== "todo" && t.status !== "proposed" && t.status !== "held") throw new RunError(`ticket is ${t.status}`, 409);
           const out = tickets.setStatus(t.id, "cancelled");
           hub.ticket(out);

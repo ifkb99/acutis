@@ -1,8 +1,8 @@
 import type { HubMessage } from "../core/hub";
 
 /**
- * Tell the operator when something needs them. A permission request, or a run reaching review or
- * failing, is sent at once. Questions (from scouts, contract requests), proposed tickets (from
+ * Tell the operator when something needs them. A permission request, a run reaching review or
+ * failing, or a ticket draft ready, is sent at once. Questions (from scouts, contract requests), proposed tickets (from
  * scouts, a worker's request_work) and proposed lessons arrive in bursts, so they are batched: one notification once
  * things go quiet for a minute, and never more than five minutes after the first.
  * Desktop notifications via notify-send (if installed), and/or a POST to a webhook such as an
@@ -89,6 +89,14 @@ export function makeNotifier(opts: {
         send(`Acutis run ${run_id} needs permission`, what, run_id);
       } else if (kind === "run.state" && (d.to === "awaiting_review" || d.to === "failed")) {
         send(`Acutis run ${run_id}: ${d.to === "failed" ? "failed" : "ready for review"}`, d.reason ?? "", run_id);
+      } else if (kind === "writer.ready") {
+        // A draft is the answer to something the operator just asked for: no batching.
+        const q = Number(d.questions ?? 0);
+        send(
+          `Acutis: ticket draft ${d.draft ? "ready" : "stopped"}${q ? ` with ${q} question${q > 1 ? "s" : ""}` : ""}`,
+          d.budget ? "It stopped at this round's budget." : "Review it in the Drafts panel.",
+          run_id,
+        );
       } else if (kind === "scout.decision") {
         queue(String(d.question ?? "a question"));
       } else if (kind === "contract.request") {

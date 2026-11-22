@@ -216,3 +216,21 @@ details.col > summary h2 { display: inline; }
 .shot img { max-width: min(100%, 420px); max-height: 320px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); }
 .composer > div:first-child textarea { flex: 1; }
 .composer > .row { justify-content: flex-start; }
+
+/* ticket drafts */
+.draft-item { display: flex; flex-direction: column; gap: 8px; cursor: default; }
+.draft-item .muted { color: var(--muted); font-size: 12px; }
+.draft-item .detail { font-size: 12px; white-space: pre-wrap; }
+.draft-item .detail.err { color: var(--err); }
+.draft-prompt { white-space: pre-wrap; }
+.draft-questions { display: flex; flex-direction: column; gap: 10px; border-left: 2px solid var(--warn); padding-left: 8px; }
+.draft-q { display: flex; flex-direction: column; gap: 4px; }
+.draft-q .title { font-weight: 600; font-size: 13px; }
+.draft-q label { display: flex; gap: 6px; align-items: center; }
+.draft-item input:not([type="checkbox"]), .draft-item textarea {
+  width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--panel); color: var(--text); resize: vertical;
+}
+.draft-body { display: flex; flex-direction: column; gap: 6px; }
+.draft-title { font-weight: 600; }
+.draft-md { max-height: 360px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; background: var(--panel-2); font-size: 13px; }

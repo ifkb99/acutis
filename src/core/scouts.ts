@@ -117,8 +117,9 @@ export function redactSecrets(text: string): string {
 export const runnerSource = (type: string) => `scout-run:${type}`;
 export const scoutSource = (type: string) => `scout:${type}`;
 /** A scout's own runner ticket: an implementation detail, never shown as work. */
-export const isRunnerTicket = (t: Pick<Ticket, "source">) => t.source.startsWith("scout-run:");
-export const runnerType = (t: Pick<Ticket, "source">) => (isRunnerTicket(t) ? t.source.slice("scout-run:".length) : null);
+/** A run's own hidden ticket: a scout's runner, or a ticket writer's draft ("writer-run"). Never listed or started by hand. */
+export const isRunnerTicket = (t: Pick<Ticket, "source">) => t.source.startsWith("scout-run:") || t.source === "writer-run";
+export const runnerType = (t: Pick<Ticket, "source">) => (t.source.startsWith("scout-run:") ? t.source.slice("scout-run:".length) : null);
 
 export const MAX_SCOUT_TICKETS = 5;
 export const MAX_SCOUT_DECISIONS = 5;

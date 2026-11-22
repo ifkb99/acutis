@@ -119,6 +119,9 @@ queued → preparing (workspace + env) → running → verifying ─┬─▶ aw
                                              └─▶ cancelled
 ```
 
+Scouts and the ticket writer skip verification: a scout ends `done` after its turn, and a writer
+rests in `paused` until the operator answers, saves or discards (see "The ticket writer").
+
 A redirect is `interrupt()` followed by a new user message. The SDK ends the
 interrupted response with `error_during_execution`. The run treats that as
 expected while a redirect is pending, not as a failure.
@@ -239,6 +242,37 @@ There are two separate questions: where the agent loop runs, and where the app r
   `docker exec -i <ctr> claude …`, so the SDK's stdio protocol, and therefore
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
+
+### The ticket writer (2026-11-22)
+
+**Draft with agent** in the New ticket form (or `acutis draft <repo> <request>`) turns a rough
+request into a full ticket. A writer agent reads the repo at trunk and asks the operator only what
+only they can decide.
+
+- **A third run kind, `writer`.** It reuses the run machinery: slots and the queue, cost, Stop,
+  resume after a restart, and the timeline. Each draft gets its own hidden ticket (source
+  `writer-run`), so several drafts can run at once. `start()` refuses that ticket for anything but
+  the writer, and `approve()` refuses any run that isn't `work`. The writer lands nothing.
+- **It only reads.** It works in a scratch checkout of trunk, with Edit, Write and NotebookEdit
+  denied. Setup steps and checks are skipped: the operator is waiting, and nothing is built. The
+  declared checks reach it as text, along with decisions, lessons and the repo's existing work.
+- **Tools.**
+  - `ask_user` records one question with suggested answers and doesn't block, so a restart can't
+    lose a waiting call. The limit is 6 per round.
+  - `write_draft` saves the title and markdown body; only the latest version counts.
+  - Both are events, and `draftView` rebuilds the panel from them, so a reload, a kill or a budget
+    stop keeps the draft. A turn that saves no draft gets one reminder.
+- **Between turns the run rests in `paused`**, with its session closed. `awaiting_review` would
+  have fired review notifications and invited an approve. Answers and revision notes go through
+  `message()`, so the same session continues, live or resumed. An answer can also be kept as a repo
+  decision. The budget is $0.50 per round, enforced by the live cost stop and an SDK backstop.
+- **Save** creates an ordinary `todo` ticket (source `writer`), with any operator edits. It ends
+  the run and removes the workspace, and Save & start also starts a worker on it. The check and
+  the save run with no await between them, so a double click makes one ticket. Discard kills the
+  writer and removes its workspace. A failed writer keeps its workspace, so an answer can still
+  continue it.
+- **Notification:** a ready draft is notified at once (`writer.ready`), not batched. It answers
+  something the operator just asked for.
 
 ### Phase 5 real run (2026-11-22, duke-ml copy, $1.10)
 

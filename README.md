@@ -90,6 +90,13 @@ answer go to the Decisions panel (`acutis decisions`), ranked by how much work w
 answer becomes a decision every later worker and scout follows. Workers that need work outside
 their ticket (`request_work`) file it as a proposed ticket for you to accept or reject.
 
+To write a ticket with help, type a rough request into the New ticket form and press **Draft with
+agent** (or `bun src/cli.ts draft <repo> "<request>"`). A writer agent reads the repo at trunk and
+drafts the ticket: context with file paths, what to change, acceptance criteria and what's out of
+scope. It asks you only what it can't find out itself. Answer in the Drafts panel, ask for
+revisions, edit the result and save it as a ticket (or save and start it). Each round costs up to
+about $0.50.
+
 Lessons are short how-tos for a repo ("build the engine before the harness tests"). Workers and
 scouts propose them, and after each run a cheap model may draft one from the run's report. You
 approve, reword or reject them in the dashboard's Lessons panel or with `acutis lessons`; approved
