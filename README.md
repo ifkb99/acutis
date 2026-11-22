@@ -117,7 +117,7 @@ library:               # optional: which tracked docs workers can search (these 
   include: ["**/*.md", "**/*.mdx", "**/*.rst", "docs/**/*.txt"]
   exclude: ["**/node_modules/**", "**/vendor/**", ".acutis/**"]
   describe: false      # a cheap model describes doc sections to improve search (≈$0.26 for 38 docs, once)
-  librarian: false     # workers can ask_librarian: a cheap model answers from the docs, with citations
+  librarian: true      # workers can ask_librarian: a cheap model answers from the docs, with citations
 gates:                 # run in the workspace after the agent finishes; failures go back to the agent
   - bun run typecheck
   - bun test

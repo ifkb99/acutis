@@ -278,7 +278,7 @@ Ideas from reviewing anima-research's connectome-host and context-manager; see t
 
   A rebuilt library forgets per-commit describe state, so describing runs again from the cache.
 - **`project_overview`**: a table of contents of the docs, at no model cost.
-- **`ask_librarian`** (`library.librarian`, off by default). A short, synchronous Haiku session with
+- **`ask_librarian`** (`library.librarian`, on by default since 2026-11-21: it costs nothing until a worker asks; the A/B checks it). A short, synchronous Haiku session with
   only the search, read and overview tools answers one question, marking claims `[SRC: path:line]`,
   `[INF]`, `[GEN]` or ❓. Acutis flags `[SRC]` citations to entries the librarian never opened, and
   adds its cost to the run. It is an Acutis tool rather than a native SDK subagent, because subagents run in

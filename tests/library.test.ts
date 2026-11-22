@@ -41,8 +41,9 @@ describe("library units", () => {
       exclude: ["**/node_modules/**", "**/vendor/**", ".acutis/**"],
       describe: false,
       describe_budget_usd: 0.5,
-      librarian: false,
+      librarian: true,
     });
+    expect(parseWorkflow("---\nlibrary:\n  librarian: false\n---\n", "t").library).toMatchObject({ librarian: false, describe: false });
     expect(() => parseWorkflow("---\nlibrary: [1]\n---\n", "t")).toThrow(/library/);
   });
 

@@ -702,7 +702,15 @@ export class RunManager {
           decisions,
           trunkResults: a.trunkResults ?? "(not re-run after a restart; run the checks yourself if you need them)",
         })
-      : workerSystemPrompt({ ticket: a.ticket, cwd: a.ws.path, workflow: a.workflow, repo: a.repo, sandboxed: this.deps.agentSandboxed, decisions });
+      : workerSystemPrompt({
+          ticket: a.ticket,
+          cwd: a.ws.path,
+          workflow: a.workflow,
+          repo: a.repo,
+          sandboxed: this.deps.agentSandboxed,
+          decisions,
+          librarian: Boolean(a.workflow.library && a.workflow.library.librarian && this.deps.oneShot),
+        });
     const session = this.deps.runner.start({
       cwd: a.ws.path,
       prompt,
