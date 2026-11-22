@@ -266,6 +266,8 @@ function formatEvent(e: { id: number; kind: string; data: any }): string | null 
       return `  proposed lesson L${d.id}${d.source === "draft" ? " (drafted from the report)" : ""}: ${d.text}`;
     case "work.request":
       return `  requested work: ticket #${d.ticket} ${d.title}${d.existing ? " (already requested)" : " (proposed)"}`;
+    case "worker-check.result":
+      return `  worker ran check ${d.name ?? d.run}: ${d.ok ? "pass" : `FAIL (exit ${d.exit_code})`}`;
     case "scout.triggered":
       return `  woken by a trunk change (${String(d.from).slice(0, 8)}..${String(d.to).slice(0, 8)}): ${(d.paths ?? []).slice(0, 5).join(", ")}${(d.paths ?? []).length > 5 ? " …" : ""}`;
     case "contract.request":

@@ -240,6 +240,21 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Workers run checks through Acutis (2026-11-22)
+
+- **The problem.** On Linux the worker's own shell (the Agent SDK's sandbox) blocks every Unix
+  socket with seccomp: it can't filter by path. Tools that use socket IPC fail there, e.g. `npx
+  tsx`, so `npm test -w packages/harness` on duke-ml failed for both real workers, who then hunted
+  for a workaround. Acutis's own check sandbox allows sockets (it hides `/run`, where the dangerous
+  ones live, and has no network), so the same check passed at verification.
+- **Not the fix:** `allowAllUnixSockets` would also let the worker reach D-Bus, docker.sock and
+  similar, which are ways out of the sandbox.
+- **The fix:** `run_checks(names?)` runs the repo's declared command checks (trunk policy only,
+  never arbitrary commands) in Acutis's check sandbox, exactly as verification will, and returns
+  pass/fail with the end of each failure's output. Results are logged as `worker-check.result`,
+  separate from Acutis's own `gate.result`; verification still runs after. Up to 20 checks a run,
+  one at a time. The prompt's checks paragraph points at it.
+
 ### Trunk triggers (2026-11-22, phase 5 of the scouts plan)
 
 - **Opt-in, in trunk's workflow**: `scouts: { <type>: { triggers: [globs] }, trigger_debounce_min,

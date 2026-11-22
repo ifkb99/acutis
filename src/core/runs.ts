@@ -109,6 +109,7 @@ interface Active {
   contractRequests: number;
   workRequests: number;
   lessonProposals: number;
+  workerChecks: number;
   /** Check failures from earlier attempts, for the lesson draft. */
   priorFailures: string[];
   /** The lessons this run's prompt carries (fixed for the run, so resumed sessions match). */
@@ -174,6 +175,7 @@ const MAX_LIBRARIAN_PER_RUN = 8;
 const MAX_CONTRACT_REQUESTS_PER_RUN = 3;
 const MAX_WORK_REQUESTS_PER_RUN = 3;
 const MAX_LESSON_PROPOSALS_PER_RUN = 3;
+const MAX_WORKER_CHECKS_PER_RUN = 20;
 
 /** What changed on trunk to wake a scout. */
 export interface TrunkTrigger {
@@ -436,6 +438,7 @@ export class RunManager {
       contractRequests: 0,
       workRequests: 0,
       lessonProposals: 0,
+      workerChecks: 0,
       priorFailures: [],
       scoutTickets: 0,
       scoutDecisions: 0,
@@ -737,6 +740,7 @@ export class RunManager {
       contractRequests: 0,
       workRequests: 0,
       lessonProposals: 0,
+      workerChecks: 0,
       priorFailures: [],
       scoutTickets: 0,
       scoutDecisions: 0,
@@ -1017,7 +1021,8 @@ export class RunManager {
     runId: number,
     a: Active,
     step: CommandGate,
-    phase: "setup" | "gate",
+    /** setup: trunk policy, on the host. gate: Acutis's checks. worker-check: a check the worker ran via run_checks. */
+    phase: "setup" | "gate" | "worker-check",
     /** If this turns false while the command runs (e.g. the run was killed), its result isn't reported. */
     alive: () => boolean = () => true,
   ): Promise<{ ok: boolean; code: number; output: string }> {
@@ -1027,13 +1032,13 @@ export class RunManager {
     // setsid makes the command its own process group so a kill or timeout takes its children too.
     // Setup steps are trunk policy run before the worker has touched anything, so they run on the
     // host (they usually need the network). Gates run worker-written code: confine them.
-    const sandbox = phase === "gate" ? this.deps.commandSandbox : undefined;
+    const sandbox = phase !== "setup" ? this.deps.commandSandbox : undefined;
     const argv = sandbox ? sandbox.wrap(step.run, a.ws.path) : ["setsid", "sh", "-c", step.run];
     const proc = Bun.spawn(argv, {
       cwd: a.ws.path,
       stdout: "pipe",
       stderr: "pipe",
-      env: phase === "gate" ? workerEnv({ CI: "1" }) : { ...process.env, CI: "1" },
+      env: phase !== "setup" ? workerEnv({ CI: "1" }) : { ...process.env, CI: "1" },
     });
     a.gate = proc;
     const timer = setTimeout(() => killGroup(proc), (step.timeout_s ?? 600) * 1000);
@@ -1281,6 +1286,49 @@ export class RunManager {
     }
   }
 
+  /**
+   * The repo's declared checks, run the way Acutis will run them (its check sandbox: no network, but
+   * Unix sockets work, unlike the worker's own shell). Only checks from trunk's policy, never
+   * arbitrary commands. Results are the worker's, not a verdict: verification still runs after.
+   */
+  private runChecksTool(runId: number, a: () => Active): AcutisTool {
+    return {
+      name: "run_checks",
+      description:
+        "Run this repo's checks exactly as Acutis will after you finish, in its check sandbox (no network, but Unix sockets work, so tools like tsx run normally). " +
+        "Use it instead of running a check in your own shell when that fails for sandbox reasons. Returns each check's result and the end of its output.",
+      params: {
+        names: { type: "string", description: "Optional: comma-separated check names or commands to run (default: all of them).", optional: true },
+      },
+      handler: async (args): Promise<ToolOutput> => {
+        const x = a();
+        const cmds = x.workflow.gates.filter((g): g is CommandGate => g.kind === "cmd");
+        const want = String(args.names ?? "")
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean);
+        const chosen = want.length ? cmds.filter((g) => want.some((w) => (g.name ?? "").toLowerCase().includes(w) || g.run.toLowerCase().includes(w))) : cmds;
+        if (!chosen.length) return { text: `No check matches. Checks: ${cmds.map((g) => describeGate(g)).join("; ")}`, isError: true };
+        if (x.gate) return { text: "A check is already running for this run; wait for it.", isError: true };
+        if (x.workerChecks + chosen.length > MAX_WORKER_CHECKS_PER_RUN) {
+          return { text: `This run already ran ${x.workerChecks} checks through Acutis (limit ${MAX_WORKER_CHECKS_PER_RUN}). Run them in your shell, or finish: Acutis runs them all after.`, isError: true };
+        }
+        const run = this.mustGet(runId);
+        const alive = () => this.mustGet(runId).state === run.state;
+        const out: string[] = [];
+        for (const g of chosen) {
+          x.workerChecks++;
+          const r = await this.runCommand(runId, x, g, "worker-check", alive);
+          if (!alive()) return { text: "The run stopped while the checks ran.", isError: true };
+          const label = g.name && g.name !== g.run ? `${g.name} (${g.run})` : g.run;
+          out.push(`${r.ok ? "PASS" : `FAIL (exit ${r.code})`}  ${label}${!r.ok && r.output.trim() ? `\n${tail(r.output, 3000)}` : ""}`);
+        }
+        const skipped = x.workflow.gates.length - cmds.length;
+        return { text: `${out.join("\n\n")}${skipped ? `\n\n(${skipped} browser check${skipped > 1 ? "s" : ""} not run here; Acutis runs ${skipped > 1 ? "them" : "it"} after you finish.)` : ""}` };
+      },
+    };
+  }
+
   private lessonTool(runId: number, a: () => Active, source: string): AcutisTool {
     return {
       name: "propose_lesson",
@@ -1386,6 +1434,7 @@ export class RunManager {
     if (wf?.library) tools.push(...this.libraryTools(runId, a));
     tools.push(this.noticedTool(runId, a));
     tools.push(this.workRequestTool(runId, a));
+    if (wf?.gates.some((g) => g.kind === "cmd")) tools.push(this.runChecksTool(runId, a));
     if (wf?.lessons) tools.push(this.lessonTool(runId, a, "worker"));
     if (wf && Object.keys(wf.contracts).length) tools.push(this.contractRequestTool(runId, a));
     tools.push(...this.previewTools(runId, a));

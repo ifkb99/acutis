@@ -1135,6 +1135,7 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
       );
     case "gate.start":
     case "setup.start":
+    case "worker-check.start":
       return null;
     case "gate.result":
     case "setup.result":
@@ -1199,6 +1200,12 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
     case "contract.changed":
     case "contract.stale":
       return <div className="ev flag">⚠ {d.msg}</div>;
+    case "worker-check.result":
+      return (
+        <div className="ev log">
+          the agent ran a check through Acutis: <code>{d.name ?? d.run}</code> {d.ok ? "passed" : `failed (exit ${d.exit_code})`}
+        </div>
+      );
     case "scout.triggered":
       return (
         <div className="ev log">

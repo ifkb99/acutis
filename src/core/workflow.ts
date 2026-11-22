@@ -368,7 +368,7 @@ Rules:
 
 When you finish, Acutis runs these checks in the workspace:
 ${gates}
-Run them yourself first where you can.${
+Run them yourself first${opts.workflow.gates.some((g) => g.kind === "cmd") ? ` with \`mcp__acutis__run_checks\`, which runs them exactly as Acutis will (in your own shell, a check that uses Unix sockets fails for sandbox reasons, not because of your change)` : " where you can"}.${
     opts.workflow.library
       ? `
 
