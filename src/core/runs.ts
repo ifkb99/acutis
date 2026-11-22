@@ -11,6 +11,7 @@ import {
   MAX_SCOUT_TICKETS,
   SCOUT_TYPES,
   isRunnerTicket,
+  redactSecrets,
   runnerSource,
   runnerType,
   scoutSettings,
@@ -119,8 +120,19 @@ export function costDelta(total: number, lastSeen: number | null, kind: "result"
 }
 
 const COST_POLL_TIMEOUT_MS = 2000;
+
+/** Redact a tool call's arguments; if that breaks the JSON, keep the redacted text instead. */
+function redactInput(input: unknown): unknown {
+  const text = redactSecrets(JSON.stringify(input ?? {}));
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { redacted: text };
+  }
+}
 const MAX_NOTICED_PER_RUN = 10;
-const clip = (s: unknown, n: number) => String(s ?? "").trim().slice(0, n);
+/** Agent-written text that Acutis stores or passes on: trimmed, capped, and with credentials redacted. */
+const clip = (s: unknown, n: number) => redactSecrets(String(s ?? "")).trim().slice(0, n);
 
 const unavailableBrowser: BrowserProvider = {
   available: false,
@@ -329,6 +341,9 @@ export class RunManager {
     const scout = run.kind === "scout" ? run.scout! : null;
     const settings = scout ? scoutSettings(workflow, scout) : null;
     if (scout && !settings) throw new Error(`the ${scout} scout is turned off for this repo (${workflow.source})`);
+    if (scout && SCOUT_TYPES[scout]?.needs === "preview" && !workflow.preview) {
+      throw new Error(`the ${scout} scout needs a preview command in ${workflow.source} to look at the app`);
+    }
     // For a scout, a failing setup step or check on trunk is a finding, not a reason to stop.
     const results: string[] = [];
     for (const step of workflow.setup) {
@@ -585,9 +600,15 @@ export class RunManager {
           }
           return;
         }
-        default:
-          hub.emit(runId, ev.kind, { ...ev });
+        default: {
+          // What an agent files through Acutis's own tools is stored redacted, so the event log matches.
+          const data =
+            ev.kind === "agent.tool_use" && ev.name.startsWith("mcp__acutis__")
+              ? { ...ev, input: redactInput(ev.input) }
+              : { ...ev };
+          hub.emit(runId, ev.kind, data);
           this.pollCost(runId, a, session);
+        }
       }
     }
   }
@@ -782,6 +803,14 @@ export class RunManager {
     const wf = this.active.get(runId)?.workflow;
     if (wf?.library) tools.push(...this.libraryTools(runId, a));
     tools.push(this.noticedTool(runId, a));
+    tools.push(...this.previewTools(runId, a));
+    return tools;
+  }
+
+  /** The preview server and the checking browser, when the repo declares a preview. */
+  private previewTools(runId: number, a: () => Active): AcutisTool[] {
+    const tools: AcutisTool[] = [];
+    const wf = this.active.get(runId)?.workflow;
     if (!wf?.preview) return tools;
     tools.push({
       name: "preview",
@@ -1125,6 +1154,7 @@ ${this.workSnapshot(repo)}`;
     };
     const wf = this.active.get(runId)?.workflow;
     const tools: AcutisTool[] = wf?.library ? this.libraryTools(runId, a) : [];
+    if (SCOUT_TYPES[type]?.needs === "preview") tools.push(...this.previewTools(runId, a));
     const ownOpen = (x: Active, id: unknown): Decision | string => {
       const d = this.deps.store.getDecision(Number(id));
       if (!d || d.repo !== x.repo.name) return `No decision #${id} in this repo.`;

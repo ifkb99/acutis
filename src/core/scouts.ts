@@ -7,6 +7,8 @@ import type { Decision, Ticket, Workflow } from "./types";
  */
 export interface ScoutType {
   title: string;
+  /** Extra tools this scout gets: "preview" adds the preview server and checking browser (and needs one). */
+  needs?: "preview";
   /** What this scout looks for. */
   lens: string;
   /** What counts as evidence for its findings. */
@@ -36,6 +38,77 @@ export const SCOUT_TYPES: Record<string, ScoutType> = {
       "show the change you made to the code and the test run that still passed.",
   },
 };
+
+Object.assign(SCOUT_TYPES, {
+  architecture: {
+    title: "Architecture",
+    lens:
+      "how the code is put together: modules that know too much about each other, layering the repo's own docs say " +
+      "it has but the imports break, duplicated abstractions or near-copies that drifted apart, god files and functions " +
+      "that every change has to touch, and dead code. Prefer problems that make the next likely change hard over taste.",
+    evidence:
+      "Name the files and the specific imports, calls or duplicated blocks (file:line for each side), and say which " +
+      "kind of change they make harder. Measure where you can (how many files import X, how long a function is).",
+  },
+  security: {
+    title: "Security",
+    lens:
+      "secrets committed to the repo, untrusted input reaching a shell, SQL, the filesystem, HTML or eval without " +
+      "checks, missing or wrong authentication and authorization, unsafe defaults (debug on, permissive CORS, " +
+      "world-writable files), and dependencies with known problems. Think about who controls each input.",
+    evidence:
+      "Cite the exact file:line and the path an attacker's input takes to get there. NEVER copy a secret's value " +
+      "into anything you file: say which file and line holds it and what kind of secret it looks like. Acutis also " +
+      "redacts anything that looks like a key in what you file, but don't rely on that.",
+  },
+  ui: {
+    title: "UI/UX",
+    needs: "preview",
+    lens:
+      "what a person using the app runs into: layouts that break at phone width (390px) or large screens, text that " +
+      "overflows or is cut off, controls that are hard to hit or reach by keyboard, missing focus states and labels, " +
+      "low contrast, console errors, flows that dead-end or lose input, and inconsistent styles between pages.",
+    evidence:
+      "Use `mcp__acutis__browser` to see each problem and say the path, viewport width and steps that show it. Your " +
+      "screenshots are kept with this run, so say \"see the screenshot of <path> at <width>px in run N\" in the ticket.",
+  },
+  domain: {
+    title: "Domain logic",
+    lens:
+      "places where the code disagrees with what the project says it should do: its docs, specs, comments, tests and " +
+      "names. Edge cases the rules imply but the code doesn't handle (empty, zero, boundaries, ordering, time zones, " +
+      "concurrency), invariants that can be broken, and behaviour that two parts of the code implement differently.",
+    evidence:
+      "Quote the rule (doc or spec file:line) next to the code that breaks it (file:line), and give a concrete input " +
+      "and the result it produces. Where you can, prove it with a small throwaway test in your scratch workspace.",
+  },
+  docs: {
+    title: "Docs",
+    lens:
+      "documentation that no longer matches the code (commands, flags, file paths, APIs, setup steps), missing " +
+      "explanations a newcomer or a worker would need, and the library gaps workers reported: questions they " +
+      "searched the docs for and couldn't answer. Prefer gaps that cost workers time over polish.",
+    evidence:
+      "For drift, quote the doc (file:line) and show what the code or a command actually does. For a missing " +
+      "explanation, say who needs it and what they would otherwise have to read.",
+  },
+} satisfies Record<string, ScoutType>);
+
+/**
+ * Remove things that look like credentials from text a scout or worker files: it ends up in
+ * tickets and other agents' prompts. Best effort; the scout is also told never to copy secrets.
+ */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted private key]")
+    .replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "[redacted AWS key]")
+    // sk-…, sk-proj-…, sk-ant-…, and Stripe-style sk_live_/pk_test_ (not snake_case identifiers like pk_user_id).
+    .replace(/\b(?:sk|rk|pk)-(?:proj-|ant-[a-z0-9]+-)?[A-Za-z0-9_-]{20,}|\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}/g, "[redacted key]")
+    .replace(/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}\b|\bgithub_pat_[A-Za-z0-9_]{40,}\b/g, "[redacted GitHub token]")
+    .replace(/\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, "[redacted Slack token]")
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted JWT]")
+    .replace(/\b((?:api|secret|access|auth|private)[_-]?(?:key|token|secret)|password|passwd)(\s*[:=]\s*)(["']?)[^\s"']{8,}\3/gi, "$1$2$3[redacted]$3");
+}
 
 export const runnerSource = (type: string) => `scout-run:${type}`;
 export const scoutSource = (type: string) => `scout:${type}`;
