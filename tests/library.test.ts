@@ -228,9 +228,11 @@ describe("library and noticed in runs", () => {
       await c.nextMessage();
     };
     const { app, ticket } = await setup([first, second], { "README.md": "# Demo\n" });
+    // Scripts go to sessions in start order; runs prepare in parallel, so start the second after the first.
     const r1 = await app.runs.start(ticket("one").id);
+    await waitFor(() => app.store.getRun(r1.id)!.state === "awaiting_review", 10000);
     const r2 = await app.runs.start(ticket("two").id);
-    await waitFor(() => ["awaiting_review"].includes(app.store.getRun(r2.id)!.state) && app.store.getRun(r1.id)!.state === "awaiting_review", 10000);
+    await waitFor(() => app.store.getRun(r2.id)!.state === "awaiting_review", 10000);
 
     const open = app.runs.listNoticed("open");
     const clippy = open.find((n) => n.title === "Clippy fails on base")!;

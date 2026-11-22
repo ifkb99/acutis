@@ -31,9 +31,18 @@ const usesOldContract: FakeScript = async (c) => {
 
 async function setup(scripts: FakeScript[], land = "trunk", extra = "", home = tempDir("acutis-home-")) {
   const repoPath = await makeRepo({ "src/api.ts": API, "src/app.ts": APP, ".acutis/workflow.md": workflow(land, extra) });
-  const app = createApp({ home, port: 0 }, { runner: new FakeRunner(scripts) });
+  const runner = new FakeRunner(scripts);
+  const app = createApp({ home, port: 0 }, { runner });
   app.store.addRepo({ name: "demo", path: repoPath, base: "main" });
-  return { app, repoPath, home, ticket: (t: string) => app.tickets.create({ repo: "demo", title: t, body: "" }) };
+  // FakeRunner hands scripts out in session-start order, and runs prepare in parallel: start the
+  // next run only once this one's session has its script.
+  const startInOrder = async (title: string) => {
+    const n = runner.sessions.length;
+    const run = await app.runs.start(app.tickets.create({ repo: "demo", title, body: "" }).id);
+    await waitFor(() => runner.sessions.length > n, 10000);
+    return run;
+  };
+  return { app, repoPath, home, startInOrder, ticket: (t: string) => app.tickets.create({ repo: "demo", title: t, body: "" }) };
 }
 
 describe("contracts", () => {
@@ -53,9 +62,9 @@ describe("contracts", () => {
       c.result();
       await c.nextMessage();
     };
-    const { app, repoPath, ticket } = await setup([renamesContract, usesOldContract, adapts]);
-    const a = await app.runs.start(ticket("Rename greet to hello").id);
-    const b = await app.runs.start(ticket("Greet y too").id);
+    const { app, repoPath, startInOrder } = await setup([renamesContract, usesOldContract, adapts]);
+    const a = await startInOrder("Rename greet to hello");
+    const b = await startInOrder("Greet y too");
     await until(app, a.id, "awaiting_review");
     await until(app, b.id, "awaiting_review");
     expect(app.store.events(a.id).some((e) => e.kind === "contract.changed")).toBe(true);
@@ -87,9 +96,9 @@ describe("contracts", () => {
       c.result();
       await c.nextMessage();
     };
-    const { app, ticket } = await setup([renamesContract, unrelated]);
-    const a = await app.runs.start(ticket("rename").id);
-    const b = await app.runs.start(ticket("readme").id);
+    const { app, startInOrder } = await setup([renamesContract, unrelated]);
+    const a = await startInOrder("rename");
+    const b = await startInOrder("readme");
     await until(app, a.id, "awaiting_review");
     await until(app, b.id, "awaiting_review");
     await app.runs.approve(a.id, { acceptContracts: true });
@@ -135,9 +144,9 @@ describe("contracts", () => {
       c.result();
       await c.nextMessage();
     };
-    const { app, home, ticket } = await setup([renamesContract, usesOldContract]);
-    const a = await app.runs.start(ticket("rename").id);
-    const b = await app.runs.start(ticket("greet y").id);
+    const { app, home, startInOrder } = await setup([renamesContract, usesOldContract]);
+    const a = await startInOrder("rename");
+    const b = await startInOrder("greet y");
     await until(app, a.id, "awaiting_review");
     await until(app, b.id, "awaiting_review");
     await app.runs.approve(a.id, { acceptContracts: true });

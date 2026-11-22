@@ -248,7 +248,8 @@ There are two separate questions: where the agent loop runs, and where the app r
   draws that line.
 - It files a **proposed** ticket (source `work-request`, "Worker-written: check it before acting"),
   never a todo one, and the ticket names the one waiting on it. Workers whose titles match once
-  normalised share one ticket. Each run can make three requests.
+  normalised share one ticket (and one notification). A request the operator rejected isn't filed
+  again: the worker is told it was rejected. Each run can make three requests.
 - The requesting run gets a flag in its events. The worker is told to carry on and to say in its
   summary what is unfinished until the requested work lands. Tickets have no dependency field, so
   that link lives in the ticket body and the flag.

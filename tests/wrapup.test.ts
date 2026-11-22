@@ -24,6 +24,7 @@ describe("notification batching", () => {
     n.handle(ev(1, "scout.ticket", { scout: "security", id: 9, title: "t", status: "proposed" }));
     n.handle(ev(1, "scout.ticket", { scout: "security", id: 10, title: "t2", status: "todo" })); // already on the board: not "waiting"
     n.handle(ev(2, "work.request", { ticket: 11, title: "w", status: "proposed" }));
+    n.handle(ev(3, "work.request", { ticket: 11, title: "w", status: "proposed", existing: true })); // a second worker sharing #11
     expect(sent).toEqual([]);
     await waitFor(() => sent.length > 0, 2000);
     await Bun.sleep(150);
@@ -34,15 +35,15 @@ describe("notification batching", () => {
   });
 
   test("a steady trickle still sends by the max wait", async () => {
-    const { n, sent } = setup(80, 250);
+    // Quiet window 1s, max wait 300ms: only the max wait can send while questions keep coming.
+    const { n, sent } = setup(1000, 300);
     const t0 = Date.now();
-    for (let i = 0; i < 12; i++) {
-      n.handle(ev(1, "scout.decision", { id: i, question: `q${i}` }));
-      await Bun.sleep(40); // always inside the quiet window
+    while (Date.now() - t0 < 600) {
+      n.handle(ev(1, "scout.decision", { id: 0, question: "q" }));
+      await Bun.sleep(30);
     }
     expect(sent.length).toBeGreaterThanOrEqual(1);
-    expect(Date.now() - t0).toBeGreaterThan(250);
-    expect(sent[0]!.title).toMatch(/^Acutis: \d+ questions waiting for you$/);
+    expect(sent[0]!.title).toMatch(/^Acutis: \d+ questions? waiting for you$/);
   });
 
   test("permission requests and reviews are still sent at once", () => {
@@ -51,6 +52,27 @@ describe("notification batching", () => {
     n.handle(ev(3, "run.state", { to: "awaiting_review" }));
     expect(sent.map((s) => s.title)).toEqual(["Acutis run 3 needs permission", "Acutis run 3: ready for review"]);
     expect(sent[0]!.link).toContain("#run-3");
+  });
+
+  test("drain waits for a slow webhook post before shutdown", async () => {
+    const got: string[] = [];
+    const hook = Bun.serve({
+      port: 0,
+      fetch: async (req) => {
+        await Bun.sleep(300);
+        got.push(`${req.headers.get("title")}|${await req.text()}`);
+        return new Response("ok");
+      },
+    });
+    try {
+      const n = makeNotifier({ port: 1, desktop: false, webhook: `http://127.0.0.1:${hook.port}/`, batchQuietMs: 60_000, batchMaxMs: 60_000 });
+      n.handle(ev(1, "scout.decision", { id: 1, question: "Which lockfile wins?" }));
+      await n.drain();
+      expect(got.length).toBe(1);
+      expect(got[0]).toContain("Acutis: 1 question waiting for you|• Which lockfile wins?");
+    } finally {
+      hook.stop(true);
+    }
   });
 
   test("drain sends what is batched", async () => {
@@ -101,6 +123,24 @@ describe("request_work (needs between areas)", () => {
     expect(app.store.events(r2.id).find((e) => e.kind === "work.request")!.data).toMatchObject({ ticket: filed.id, existing: true });
 
     expect(app.runs.acceptTicket(filed.id).status).toBe("todo");
+  });
+
+  test("a request the operator rejected isn't filed again", async () => {
+    const outs: string[] = [];
+    const asks: FakeScript = async (c) => {
+      outs.push((await tool(c, "request_work").handler({ title: "engine: add undo", need: "x", why: "y" })).text);
+      c.result();
+      await c.nextMessage();
+    };
+    const { app, ticket } = await setup([asks, asks]);
+    const r1 = await app.runs.start(ticket("one").id);
+    await waitFor(() => app.store.getRun(r1.id)!.state === "awaiting_review", 10000);
+    const filed = app.tickets.list({ repo: "demo" }).find((t) => t.source === "work-request")!;
+    app.runs.rejectTicket(filed.id);
+    const r2 = await app.runs.start(ticket("two").id);
+    await waitFor(() => app.store.getRun(r2.id)!.state === "awaiting_review", 10000);
+    expect(outs[1]).toContain(`already rejected this request (ticket #${filed.id})`);
+    expect(app.tickets.list({ repo: "demo" }).filter((t) => t.source === "work-request").length).toBe(1);
   });
 
   test("capped per run, and empty requests are refused", async () => {

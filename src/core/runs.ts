@@ -1471,7 +1471,11 @@ export class RunManager {
         // Two workers needing the same thing share one ticket.
         const known = this.deps.tickets
           .list({ repo: x.repo.name })
-          .find((t) => t.source === "work-request" && !["done", "cancelled"].includes(t.status) && norm(t.title) === norm(title));
+          .filter((t) => t.source === "work-request" && t.status !== "done" && norm(t.title) === norm(title))
+          .sort((p, q) => q.id - p.id)[0];
+        if (known?.status === "cancelled") {
+          return { text: `The operator already rejected this request (ticket #${known.id}). Don't do it here; work around it, and say so in your summary.` };
+        }
         if (known) {
           this.deps.hub.emit(runId, "work.request", { ticket: known.id, title: known.title, status: known.status, existing: true });
           return { text: `Already requested as ticket #${known.id} (${known.status}). Carry on, and say in your summary what waits on it.` };

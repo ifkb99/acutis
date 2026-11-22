@@ -81,7 +81,7 @@ export function makeNotifier(opts: {
         queue(String(d.question ?? "a question"));
       } else if (kind === "contract.request") {
         queue(`Change the ${d.contract} contract: ${d.change}`);
-      } else if ((kind === "scout.ticket" || kind === "work.request") && d.status === "proposed") {
+      } else if ((kind === "scout.ticket" || kind === "work.request") && d.status === "proposed" && !d.existing) {
         queue(null);
       }
     },
