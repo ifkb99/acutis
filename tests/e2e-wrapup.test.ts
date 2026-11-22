@@ -23,7 +23,7 @@ afterAll(() => {
   server.stop(true);
 });
 
-test.skipIf(!chrome)("the reviewer sees a run's work request, and the proposed ticket says a worker asked for it (headless Chrome)", async () => {
+test.skipIf(!chrome)("the reviewer sees a run's work request, and the proposed ticket in the sidebar says a worker asked for it (headless Chrome)", async () => {
   const repoPath = await makeRepo({ "src/a.ts": "export const a = 1;\n", ".acutis/workflow.md": "---\nland: bookmark\nmax_attempts: 1\n---\n" });
   app.store.addRepo({ name: "w", path: repoPath, base: "main" });
   const run = await app.runs.start(app.tickets.create({ repo: "w", title: "AI per-tile eval", body: "" }).id);
@@ -34,7 +34,7 @@ test.skipIf(!chrome)("the reviewer sees a run's work request, and the proposed t
     script: `JSON.stringify({
       flag: [...document.querySelectorAll('.ev.flag')].map((e) => e.textContent).join(' | '),
       why: [...document.querySelectorAll('.ticketbody summary')].map((e) => e.textContent),
-      accept: [...document.querySelectorAll('.card')].some((c) => c.textContent.includes('Engine: export getMoves') && c.textContent.includes('Accept')),
+      accept: [...document.querySelectorAll('.needs-proposed')].some((c) => c.textContent.includes('Engine: export getMoves') && c.textContent.includes('Accept')),
     })`,
     width: 1300,
     height: 900,
