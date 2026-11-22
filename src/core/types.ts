@@ -160,6 +160,8 @@ export type AgentEvent =
       /** Per-model running token totals for the session (main loop and subagents), when the runner reports them. */
       model_usage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number }>;
     }
+  /** The session's background tasks changed (e.g. a subagent the agent started in the background). */
+  | { kind: "agent.background"; running: number; tasks: { type: string; description: string }[] }
   | { kind: "agent.exit"; error?: string };
 
 export interface PermissionRequest {

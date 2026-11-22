@@ -283,9 +283,15 @@ Ideas from reviewing anima-research's connectome-host and context-manager; see t
   `[INF]`, `[GEN]` or ❓. Acutis flags `[SRC]` citations to entries the librarian never opened, and
   adds its cost to the run. It is an Acutis tool rather than a native SDK subagent, because subagents run in
   the background in this Claude Code even with `background: false` (two Haiku probes), so a worker's turn
-  could end before the answer. **Untested in Acutis:** workers also have the built-in `Agent` tool, so a
-  worker might end its turn while a subagent still works. No real run has used it yet (0 of the 12 trial
-  runs). Probe: one question, $0.002-0.004, a good answer with honest gaps. After the citation fix: 7 cited,
+  could end before the answer.
+- **Background subagents (fixed 2026-11-22).** The built-in `general-purpose` agent and custom subagents
+  run in the background when the model (or Claude Code) chooses, while `Explore` ran in the foreground. A
+  backgrounded subagent ends the agent's turn early ("I've started the agent…"), and the SDK starts a new
+  turn when it finishes. The runner now reports the SDK's `background_tasks_changed` as `agent.background`.
+  When a turn ends with tasks still running, Acutis waits for the next turn before checking the work (or
+  finishing a scout, which deletes its workspace). It checks anyway 60s after the tasks finish if the
+  agent doesn't continue, or after 30 minutes if they never finish. Verified with a real worker: it
+  backgrounded a subagent, Acutis waited, and the follow-up turn wrote the file the check needed. Probe: one question, $0.002-0.004, a good answer with honest gaps. After the citation fix: 7 cited,
   0 unsourced, 1 only seen in a search excerpt.
 
 - **A/B (2026-11-22), `scripts/ab.ts`.** Baseline (librarian and descriptions off) against treatment

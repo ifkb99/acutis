@@ -246,6 +246,16 @@ class ClaudeSdkSession implements AgentSession {
       case "system":
         if (msg.subtype === "init") {
           yield { kind: "agent.init", session_id: msg.session_id, model: msg.model, sandboxed: sandbox };
+        } else if (msg.subtype === "background_tasks_changed") {
+          // Background subagents keep working after the agent's turn ends, and the SDK starts a new
+          // turn when they finish (verified 2026-11-22 with the built-in general-purpose agent).
+          // Acutis waits for that turn before checking the work.
+          const tasks = (msg.tasks ?? []).filter((t: any) => !t.ambient);
+          yield {
+            kind: "agent.background",
+            running: tasks.length,
+            tasks: tasks.map((t: any) => ({ type: String(t.subagent_type ?? t.task_type ?? "task"), description: String(t.description ?? "") })),
+          };
         }
         return;
       case "assistant":
