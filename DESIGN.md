@@ -288,6 +288,24 @@ Ideas from reviewing anima-research's connectome-host and context-manager; see t
   runs). Probe: one question, $0.002-0.004, a good answer with honest gaps. After the citation fix: 7 cited,
   0 unsourced, 1 only seen in a search excerpt.
 
+- **A/B (2026-11-22), `scripts/ab.ts`.** Baseline (librarian and descriptions off) against treatment
+  (both on), on stahl at its latest trunk, real Opus workers, unattended (prompts auto-deny after 2 min).
+  - A pilot on a code ticket that names its file (trial ticket 7): the worker never touched the
+    library. It cost $0.72, against the trial's $0.67.
+  - Three tickets written so the wiki matters: tests for the documented round rules, `validate-mods`
+    reporting misspelt fields, and a contributor guide.
+
+    | Ticket | Baseline | Treatment |
+    |---|---|---|
+    | Round-rules tests | $3.55, 65 turns, passed first try, 1 doc/engine disagreement found | $2.94, 53 turns, passed first try, 2 found (one the baseline missed) |
+    | `validate-mods` typos | $1.99, 43 turns, passed first try | $2.94, 47 turns, passed first try; also updated `modding.md` and followed a convention in `DONE.md` |
+    | Contributor guide | killed by the $14 cap | killed by the $14 cap |
+
+    The noise repeat was also killed, so run-to-run variation isn't measured.
+  - **Result:** `ask_librarian` was called 0 times in 4 treatment runs; workers searched 1-2 times per run
+    in both arms and read docs directly. The cost and turn gaps point in opposite directions. So there is
+    no detectable effect on workers, from either the librarian or descriptions. Spend: $14.99.
+
 ### Scouts and the decision register (2026-11-21, phase 2 of the scouts plan)
 
 - **A scout run is a run with `kind = scout`**, fixed at `start()` from its ticket: each repo has one
