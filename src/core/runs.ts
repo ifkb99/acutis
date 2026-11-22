@@ -174,6 +174,20 @@ const MAX_LIBRARIAN_PER_RUN = 8;
 const MAX_CONTRACT_REQUESTS_PER_RUN = 3;
 const MAX_WORK_REQUESTS_PER_RUN = 3;
 const MAX_LESSON_PROPOSALS_PER_RUN = 3;
+
+/** What changed on trunk to wake a scout. */
+export interface TrunkTrigger {
+  from: string;
+  to: string;
+  paths: string[];
+}
+export interface TriggerOutcome {
+  scout: string;
+  outcome: "started" | "capped" | "busy" | "error";
+  run?: number;
+  error?: string;
+  paths: string[];
+}
 const LESSON_MODEL_TIMEOUT_MS = 30_000;
 const LIBRARIAN_TIMEOUT_MS = 120_000;
 
@@ -278,6 +292,7 @@ export class RunManager {
   /** Stop everything this manager started (daemon shutdown). */
   shutdown() {
     this.describeStop = true;
+    this.stopTrunkWatch();
     this.previews.stopAll();
     for (const a of this.active.values()) {
       if (a.gate) killGroup(a.gate);
@@ -303,7 +318,7 @@ export class RunManager {
     return Boolean(this.active.get(runId)?.session);
   }
 
-  async start(ticketId: number): Promise<Run> {
+  async start(ticketId: number, opts: { wokenBy?: string } = {}): Promise<Run> {
     const { store, tickets, hub } = this.deps;
     const ticket = tickets.get(ticketId);
     if (!ticket) throw new RunError(`ticket #${ticketId} not found`, 404);
@@ -324,6 +339,7 @@ export class RunManager {
       state: queued ? "queued" : "preparing",
       kind: scout ? "scout" : "work",
       scout,
+      woken_by: scout ? (opts.wokenBy ?? null) : null,
     });
     hub.run(run);
     hub.emit(run.id, "run.state", {
@@ -461,7 +477,7 @@ export class RunManager {
       a.trunkResults = results.join("\n\n");
       await this.selectLessons(run.id, a, `${SCOUT_TYPES[scout]!.title} ${settings!.focus}`);
       if (!alive()) return;
-      this.launch(run.id, this.scoutBrief(repo.name, scout, settings!.focus));
+      this.launch(run.id, this.scoutBrief(repo.name, scout, settings!.focus, this.mustGet(run.id).woken_by));
       return;
     }
     await this.selectLessons(run.id, a, `${ticket.title}\n${ticket.body}`);
@@ -1874,7 +1890,7 @@ export class RunManager {
   // ------------------------------------------------------------------ scouts
 
   /** Start a scout on a repo. Each repo has one hidden runner ticket per scout type. */
-  async startScout(repoName: string, type: string): Promise<Run> {
+  async startScout(repoName: string, type: string, trigger?: TrunkTrigger): Promise<Run> {
     if (!SCOUT_TYPES[type]) throw new RunError(`unknown scout "${type}" (known: ${Object.keys(SCOUT_TYPES).join(", ")})`, 404);
     if (!this.deps.store.getRepo(repoName)) throw new RunError(`repo "${repoName}" is not registered`, 404);
     let runner = this.deps.tickets.list({ repo: repoName }).find((t) => t.source === runnerSource(type));
@@ -1887,11 +1903,135 @@ export class RunManager {
       });
     }
     if (runner.status !== "todo") throw new RunError(`the ${type} scout is already running on ${repoName}`, 409);
-    return this.start(runner.id);
+    const run = await this.start(runner.id, { wokenBy: trigger ? JSON.stringify(trigger) : undefined });
+    if (trigger) this.deps.hub.emit(run.id, "scout.triggered", { scout: type, from: trigger.from, to: trigger.to, paths: trigger.paths });
+    return run;
+  }
+
+  // ------------------------------------------------------------ trunk triggers
+
+  private triggerChains = new Map<string, Promise<unknown>>();
+  private triggerTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private trunkWatch: ReturnType<typeof setInterval> | null = null;
+
+  /** Check every repo's trunk every `intervalMs` (the daemon calls this; tests call checkTriggers). */
+  startTrunkWatch(intervalMs = 5 * 60_000) {
+    this.stopTrunkWatch();
+    const tick = () => {
+      for (const r of this.deps.store.listRepos()) void this.checkTriggers(r.name).catch(() => {});
+    };
+    tick();
+    this.trunkWatch = setInterval(tick, intervalMs);
+    this.trunkWatch.unref?.();
+  }
+
+  private stopTrunkWatch() {
+    if (this.trunkWatch) clearInterval(this.trunkWatch);
+    this.trunkWatch = null;
+    for (const t of this.triggerTimers.values()) clearTimeout(t);
+    this.triggerTimers.clear();
+  }
+
+  /** One trigger check or wake at a time per repo (the timer and a landing can race). */
+  private serialTriggers<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.triggerChains.get(repo) ?? Promise.resolve();
+    const next = prev.catch(() => {}).then(fn);
+    this.triggerChains.set(repo, next);
+    return next;
+  }
+
+  /**
+   * Has trunk changed paths a scout watches since Acutis last looked? If so, wake those scouts
+   * after the repo's debounce (now, if it is 0). The last-seen commit only advances once a change
+   * is dealt with, so a restart during the debounce finds it again. The first look just records.
+   */
+  checkTriggers(repoName: string): Promise<TriggerOutcome[]> {
+    return this.serialTriggers(repoName, async () => {
+      const repo = this.deps.store.getRepo(repoName);
+      if (!repo) return [];
+      await this.deps.workspaces.refresh?.(repo).catch(() => {});
+      const cur = await this.deps.workspaces.resolve(repo, repo.base).catch(() => null);
+      if (!cur) return [];
+      const seen = this.deps.store.getTrunkSeen(repoName);
+      if (!seen) {
+        this.deps.store.setTrunkSeen(repoName, cur);
+        return [];
+      }
+      if (seen === cur) return [];
+      const wf = await this.loadWorkflow(repo, cur).catch(() => null);
+      const hits = wf ? await this.triggerHits(repo, wf, seen, cur) : [];
+      if (!hits.length) {
+        this.deps.store.setTrunkSeen(repoName, cur);
+        return [];
+      }
+      if (this.triggerTimers.has(repoName)) return []; // a wake is already pending; it looks at the latest trunk
+      const ms = (wf as Workflow & { scouts: Exclude<Workflow["scouts"], false> }).scouts.trigger_debounce_min * 60_000;
+      if (ms <= 0) return this.wakeTriggered(repoName);
+      const t = setTimeout(() => {
+        this.triggerTimers.delete(repoName);
+        void this.serialTriggers(repoName, () => this.wakeTriggered(repoName)).catch(() => {});
+      }, ms);
+      t.unref?.();
+      this.triggerTimers.set(repoName, t);
+      return [];
+    });
+  }
+
+  /** Paths each triggered scout watches that changed between two commits (trunk's own policy decides). */
+  private async triggerHits(repo: Repo, wf: Workflow, from: string, to: string): Promise<{ type: string; paths: string[] }[]> {
+    if (!wf.scouts) return [];
+    const out: { type: string; paths: string[] }[] = [];
+    for (const [type, t] of Object.entries(wf.scouts.types)) {
+      if (!t.enabled || !t.triggers?.length || !SCOUT_TYPES[type]) continue;
+      const paths = await this.deps.workspaces.changedBetween(repo, from, to, t.triggers);
+      if (paths.length) out.push({ type, paths: paths.slice(0, 50) });
+    }
+    return out;
+  }
+
+  private async wakeTriggered(repoName: string): Promise<TriggerOutcome[]> {
+    const repo = this.deps.store.getRepo(repoName);
+    if (!repo) return [];
+    const seen = this.deps.store.getTrunkSeen(repoName);
+    const cur = await this.deps.workspaces.resolve(repo, repo.base).catch(() => null);
+    if (!seen || !cur || seen === cur) return [];
+    const wf = await this.loadWorkflow(repo, cur).catch(() => null);
+    if (!wf || !wf.scouts) {
+      this.deps.store.setTrunkSeen(repoName, cur);
+      return [];
+    }
+    const hits = await this.triggerHits(repo, wf, seen, cur);
+    const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+    let used = this.deps.store.countTriggeredRuns(repoName, since);
+    const outcomes: TriggerOutcome[] = [];
+    let busy = false;
+    for (const h of hits) {
+      if (used >= wf.scouts.trigger_daily_cap) {
+        outcomes.push({ scout: h.type, outcome: "capped", paths: h.paths });
+        continue;
+      }
+      try {
+        const run = await this.startScout(repoName, h.type, { from: seen, to: cur, paths: h.paths });
+        used++;
+        outcomes.push({ scout: h.type, outcome: "started", run: run.id, paths: h.paths });
+      } catch (e) {
+        // Already running (on an older trunk): leave the change unseen, so it wakes again later.
+        if (e instanceof RunError && e.status === 409) busy = true;
+        outcomes.push({ scout: h.type, outcome: busy ? "busy" : "error", error: (e as Error).message, paths: h.paths });
+      }
+    }
+    if (!busy) this.deps.store.setTrunkSeen(repoName, cur);
+    for (const o of outcomes) if (o.outcome !== "started") console.log(`acutis: ${o.scout} scout not woken on ${repoName} (${o.outcome}${o.error ? `: ${o.error}` : ""})`);
+    return outcomes;
   }
 
   /** The scout's first message: its task, plus existing work as labelled data. */
-  private scoutBrief(repo: string, type: string, focus: string): string {
+  private scoutBrief(repo: string, type: string, focus: string, wokenBy: string | null = null): string {
+    let woken = "";
+    if (wokenBy) {
+      const t = JSON.parse(wokenBy) as TrunkTrigger;
+      woken = `\n\nYou were woken because trunk changed paths this repo asks you to watch (${t.from.slice(0, 12)}..${t.to.slice(0, 12)}):\n${t.paths.map((p) => `- ${p}`).join("\n")}\nLook at what changed there first (\`jj diff --from ${t.from.slice(0, 12)} --to ${t.to.slice(0, 12)}\`, or git), then at what it affects. The rest of the repo is context.`;
+    }
     const gaps =
       type === "docs"
         ? this.deps.store.listGaps({ repo, status: "open" }).slice(0, 30)
@@ -1903,7 +2043,7 @@ export class RunManager {
       : type === "docs"
         ? "\n\nLibrary gaps workers reported: (none yet)"
         : "";
-    return `Scout ${repo} for ${SCOUT_TYPES[type]!.title.toLowerCase()} work.${focus ? ` Focus: ${focus}` : ""}
+    return `Scout ${repo} for ${SCOUT_TYPES[type]!.title.toLowerCase()} work.${focus ? ` Focus: ${focus}` : ""}${woken}
 
 ${this.workSnapshot(repo)}${gapList}`;
   }
@@ -2506,6 +2646,8 @@ ${this.workSnapshot(repo)}${gapList}`;
     this.setState(runId, "done", a.workflow.land === "trunk" ? `landed on ${bookmark}` : `landed as bookmark ${bookmark}`);
     hub.ticket(this.deps.tickets.setStatus(a.ticket.id, "done"));
     if (a.workflow.land === "trunk" && changedContracts.length) this.noticeContractChange(runId, a.repo.name, changedContracts);
+    // Trunk moved: scouts watching what this landing touched may wake.
+    if (a.workflow.land === "trunk") void this.checkTriggers(a.repo.name).catch(() => {});
     return { landed: true };
   }
 

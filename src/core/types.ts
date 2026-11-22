@@ -57,6 +57,8 @@ export interface Run {
   kind: "work" | "scout";
   /** The scout type, for scout runs. */
   scout: string | null;
+  /** For a scout woken by a trunk change: JSON { from, to, paths }. */
+  woken_by: string | null;
   state: RunState;
   workspace_name: string | null;
   workspace_path: string | null;
@@ -141,6 +143,8 @@ export interface WorkspaceProvider {
   advance(repo: Repo, ws: Workspace, bookmark: string): Promise<void>;
   /** True if `name` is a local bookmark in the repo. */
   isBookmark(repo: Repo, name: string): Promise<boolean>;
+  /** Pick up trunk moves made outside the provider (e.g. a git pull in a colocated repo). Never fetches. */
+  refresh?(repo: Repo): Promise<void>;
   /** Forget the workspace and delete its directory. Keeps the change unless abandon=true. */
   destroy(repo: Repo, ws: Workspace, opts: { abandon: boolean }): Promise<void>;
 }
@@ -373,7 +377,11 @@ export interface Workflow {
         /** high: high-confidence scout tickets go straight to todo. never: all wait in proposed. */
         auto_tickets: "high" | "never";
         budget_usd: number;
-        types: Record<string, { enabled: boolean; focus: string; budget_usd?: number }>;
+        types: Record<string, { enabled: boolean; focus: string; budget_usd?: number; triggers?: string[] }>;
+        /** Wait this long after a trigger before waking the scout, so a burst of landings wakes it once. */
+        trigger_debounce_min: number;
+        /** Most trigger-woken scout runs per repo in 24 hours. */
+        trigger_daily_cap: number;
       }
     | false;
 }

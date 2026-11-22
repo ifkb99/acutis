@@ -81,7 +81,7 @@ export function defaultWorkflow(): Workflow {
     template: DEFAULT_TEMPLATE,
     source: "(default)",
     library: { include: [...DEFAULT_LIBRARY_INCLUDE], exclude: [...DEFAULT_LIBRARY_EXCLUDE], describe: false, describe_budget_usd: 0.5, librarian: true },
-    scouts: { auto_tickets: "high", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {} },
+    scouts: { auto_tickets: "high", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {}, trigger_debounce_min: 10, trigger_daily_cap: 3 },
     contracts: {},
     lessons: { draft: true, budget_chars: 1500 },
   };
@@ -163,11 +163,19 @@ function parseContracts(v: unknown): Workflow["contracts"] {
 }
 
 /**
- * `scouts: false`, or `scouts: { auto_tickets: high|never, budget_usd: N, <type>: true | false | { focus, budget_usd } }`.
+ * `scouts: false`, or `scouts: { auto_tickets: high|never, budget_usd: N, trigger_debounce_min: N, trigger_daily_cap: N,
+ *   <type>: true | false | { focus, budget_usd, triggers: [globs] } }`. A scout with `triggers` wakes
+ *   when trunk changes a matching path.
  * Every built-in scout is allowed unless turned off; the repo can't define new ones.
  */
 function parseScouts(v: unknown): Workflow["scouts"] {
-  const out = { auto_tickets: "high" as "high" | "never", budget_usd: DEFAULT_SCOUT_BUDGET_USD, types: {} as Record<string, { enabled: boolean; focus: string; budget_usd?: number }> };
+  const out = {
+    auto_tickets: "high" as "high" | "never",
+    budget_usd: DEFAULT_SCOUT_BUDGET_USD,
+    types: {} as Record<string, { enabled: boolean; focus: string; budget_usd?: number; triggers?: string[] }>,
+    trigger_debounce_min: 10,
+    trigger_daily_cap: 3,
+  };
   if (v === false) return false;
   if (v === undefined || v === null || v === true) return out;
   if (typeof v !== "object" || Array.isArray(v)) throw new Error('workflow: "scouts" must be false or a map');
@@ -178,16 +186,26 @@ function parseScouts(v: unknown): Workflow["scouts"] {
     } else if (k === "budget_usd") {
       if (typeof val !== "number" || !(val > 0)) throw new Error('workflow: "scouts.budget_usd" must be a positive number');
       out.budget_usd = val;
+    } else if (k === "trigger_debounce_min") {
+      if (typeof val !== "number" || !(val >= 0) || val > 1440) throw new Error('workflow: "scouts.trigger_debounce_min" must be a number of minutes from 0 to 1440');
+      out.trigger_debounce_min = val;
+    } else if (k === "trigger_daily_cap") {
+      if (typeof val !== "number" || !Number.isInteger(val) || val < 0 || val > 50) throw new Error('workflow: "scouts.trigger_daily_cap" must be a whole number from 0 to 50');
+      out.trigger_daily_cap = val;
     } else if (SCOUT_TYPES[k]) {
       if (typeof val === "boolean") out.types[k] = { enabled: val, focus: "" };
       else if (val && typeof val === "object") {
         const t = val as Record<string, unknown>;
+        if (t.triggers !== undefined && (!Array.isArray(t.triggers) || !t.triggers.every((g) => typeof g === "string" && g.length > 0))) {
+          throw new Error(`workflow: "scouts.${k}.triggers" must be a list of path globs`);
+        }
         out.types[k] = {
           enabled: t.enabled !== false,
           focus: typeof t.focus === "string" ? t.focus.slice(0, 1000) : "",
           budget_usd: typeof t.budget_usd === "number" && t.budget_usd > 0 ? t.budget_usd : undefined,
+          triggers: (t.triggers as string[] | undefined)?.slice(0, 50),
         };
-      } else throw new Error(`workflow: "scouts.${k}" must be true, false or { focus, budget_usd }`);
+      } else throw new Error(`workflow: "scouts.${k}" must be true, false or { focus, budget_usd, triggers }`);
     } else {
       throw new Error(`workflow: unknown scout "${k}" (known: ${Object.keys(SCOUT_TYPES).join(", ")})`);
     }

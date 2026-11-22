@@ -128,6 +128,9 @@ scouts:                # optional; every built-in scout is allowed by default, f
   auto_tickets: high   # high-confidence scout tickets go straight to todo (never = all wait in Proposed)
   budget_usd: 2
   tests: { focus: "the save/load path" }
+  infrastructure: { triggers: ["package-lock.json", "Cargo.lock", ".github/**"] }   # wake when trunk changes these
+  trigger_debounce_min: 10   # a burst of landings wakes a scout once
+  trigger_daily_cap: 3       # most trigger-woken scout runs per repo per day
 lessons:               # optional (on by default); false = off
   draft: true          # after a run reaches review, a cheap model may propose one lesson from its report
   budget_chars: 1500   # how much approved lesson text one prompt gets

@@ -127,6 +127,9 @@ async function serve(args: string[]) {
     webhook: process.env.ACUTIS_NOTIFY_URL || null,
   });
   app.hub.subscribe((m) => notifier.handle(m));
+  // Scouts with triggers wake when trunk changes what they watch (checked after landings, and here
+  // for trunk moves made outside Acutis, e.g. a pull in a colocated repo).
+  app.runs.startTrunkWatch(Number(process.env.ACUTIS_TRUNK_CHECK_S ?? 300) * 1000);
   // Previews, checks and agent processes belong to the daemon: take them down with it.
   let stopping = false;
   const shutdown = async () => {
@@ -263,6 +266,8 @@ function formatEvent(e: { id: number; kind: string; data: any }): string | null 
       return `  proposed lesson L${d.id}${d.source === "draft" ? " (drafted from the report)" : ""}: ${d.text}`;
     case "work.request":
       return `  requested work: ticket #${d.ticket} ${d.title}${d.existing ? " (already requested)" : " (proposed)"}`;
+    case "scout.triggered":
+      return `  woken by a trunk change (${String(d.from).slice(0, 8)}..${String(d.to).slice(0, 8)}): ${(d.paths ?? []).slice(0, 5).join(", ")}${(d.paths ?? []).length > 5 ? " …" : ""}`;
     case "contract.request":
       return `  requested a change to the ${d.contract} contract (decision #${d.decision}, ticket #${d.ticket}): ${d.change}`;
     case "scout.ticket":

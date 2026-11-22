@@ -240,6 +240,27 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Trunk triggers (2026-11-22, phase 5 of the scouts plan)
+
+- **Opt-in, in trunk's workflow**: `scouts: { <type>: { triggers: [globs] }, trigger_debounce_min,
+  trigger_daily_cap }` (defaults 10 minutes and 3 runs per repo per day). Nothing is triggered
+  unless a scout lists triggers.
+- **Detection from commits.** Acutis keeps the last trunk commit it has dealt with per repo
+  (`trunk_seen`). A check compares it with trunk now and asks jj which watched paths changed in
+  between, under the *current* trunk's policy. The first check only records. Checks run after
+  every `land: trunk` landing and every 5 minutes in the daemon (`ACUTIS_TRUNK_CHECK_S`); each
+  starts with `jj git import --ignore-working-copy`, so a pull or merge done with git in a
+  colocated repo counts. Nothing is ever fetched: a merge on GitHub counts once it's pulled.
+- **Debounce.** The first change schedules a wake after the debounce; later changes in that window
+  join it, and the wake looks at everything from the last-seen commit to trunk then. The last-seen
+  commit advances only when the change has been dealt with (woken, capped, or nothing watched it),
+  so a restart during the debounce finds the change again. Checks are serialised per repo.
+- **Limits.** Over the daily cap, the change is noted (and logged) without a run. If the scout is
+  already running, the change stays unseen and wakes it again once it's free. A woken scout uses
+  its normal budget, is marked `woken_by` (with the commits and paths), and its brief starts with
+  the changed paths as data. Its tickets and questions reach the operator through the batched
+  notifications.
+
 ### Lessons (2026-11-22, phase 5 of the scouts plan)
 
 - **Why push, not pull.** Real agents never called the optional knowledge tools (librarian 0 of 4

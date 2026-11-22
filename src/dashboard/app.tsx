@@ -1199,6 +1199,13 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
     case "contract.changed":
     case "contract.stale":
       return <div className="ev flag">⚠ {d.msg}</div>;
+    case "scout.triggered":
+      return (
+        <div className="ev log">
+          woken by a trunk change ({String(d.from).slice(0, 8)}..{String(d.to).slice(0, 8)}): <code>{(d.paths ?? []).slice(0, 8).join(", ")}</code>
+          {(d.paths ?? []).length > 8 ? " …" : ""}
+        </div>
+      );
     case "lessons.given":
       return (
         <div className="ev log">

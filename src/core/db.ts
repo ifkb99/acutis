@@ -109,6 +109,11 @@ CREATE TABLE IF NOT EXISTS lessons (
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   decided_at TEXT
 );
+CREATE TABLE IF NOT EXISTS trunk_seen (
+  repo TEXT PRIMARY KEY,
+  commit_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS runs_ticket ON runs(ticket_id);
 `;
@@ -135,6 +140,7 @@ export class Store {
     if (!has("tickets", "confidence")) this.db.exec("ALTER TABLE tickets ADD COLUMN confidence TEXT");
     if (!has("tickets", "decision_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN decision_id INTEGER");
     if (!has("tickets", "noticed_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN noticed_id INTEGER");
+    if (!has("runs", "woken_by")) this.db.exec("ALTER TABLE runs ADD COLUMN woken_by TEXT");
   }
 
   // ---- repos
@@ -156,12 +162,12 @@ export class Store {
   }
 
   // ---- runs
-  createRun(r: { ticket_id: number; repo: string; state: RunState; kind?: Run["kind"]; scout?: string | null }): Run {
+  createRun(r: { ticket_id: number; repo: string; state: RunState; kind?: Run["kind"]; scout?: string | null; woken_by?: string | null }): Run {
     const row = this.db
       .query<{ id: number }, any>(
-        "INSERT INTO runs (ticket_id, repo, state, kind, scout) VALUES ($ticket_id, $repo, $state, $kind, $scout) RETURNING id",
+        "INSERT INTO runs (ticket_id, repo, state, kind, scout, woken_by) VALUES ($ticket_id, $repo, $state, $kind, $scout, $woken_by) RETURNING id",
       )
-      .get({ ...r, kind: r.kind ?? "work", scout: r.scout ?? null })!;
+      .get({ ...r, kind: r.kind ?? "work", scout: r.scout ?? null, woken_by: r.woken_by ?? null })!;
     return this.getRun(row.id)!;
   }
   getRun(id: number): Run | null {
@@ -353,6 +359,20 @@ export class Store {
       .query<{ data: string }, [number, string]>("SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY id DESC LIMIT 1")
       .get(runId, kind);
     return row ? JSON.parse(row.data) : null;
+  }
+
+  // ---- trunk triggers
+  getTrunkSeen(repo: string): string | null {
+    return this.db.query<{ commit_id: string }, [string]>("SELECT commit_id FROM trunk_seen WHERE repo = ?").get(repo)?.commit_id ?? null;
+  }
+  setTrunkSeen(repo: string, commit: string) {
+    this.db
+      .query("INSERT INTO trunk_seen (repo, commit_id) VALUES (?1, ?2) ON CONFLICT(repo) DO UPDATE SET commit_id = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+      .run(repo, commit);
+  }
+  /** Trigger-woken scout runs in a repo since an ISO time. */
+  countTriggeredRuns(repo: string, sinceIso: string): number {
+    return this.db.query<{ n: number }, [string, string]>("SELECT COUNT(*) AS n FROM runs WHERE repo = ? AND woken_by IS NOT NULL AND created_at >= ?").get(repo, sinceIso)!.n;
   }
 
   // ---- lessons
