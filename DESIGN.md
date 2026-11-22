@@ -240,6 +240,29 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Phase 5 real run (2026-11-22, duke-ml copy, $1.10)
+
+- **Draft probe** (real cheap model on 9 earlier real reports, $0.006): 5 proposals. Three were
+  real repo findings, among them the duke-ml harness/tsx gotcha drafted word-perfect from the
+  contract run's report; one mixed; one restated the checks (the prompt now rules that out).
+- **Run 1** (harness ticket, no lessons, $0.43): the agent found the ticket's premise false (the
+  match CLI prints no per-game lines), stopped and asked how to proceed, which was right, so it never
+  reached the harness check. The drafter proposed a lesson from that report (about the CLI's output:
+  borderline, closer to this ticket than to the repo). **Caveat:** the run script approved it
+  reworded with pre-written harness/tsx text, so the approved lesson's content came from the
+  operator (and the probe), not from run 1's draft.
+- **Run 2** (another harness ticket, $0.24): given that lesson (the `lessons.given` event and its
+  prompt), it called `run_checks` once (all four checks passed, harness smoke included) and never
+  ran the harness in its own shell: 0 failed harness commands, against 2 of 2 earlier real runs
+  that failed first. Both the lesson and the new `run_checks` prompt line were present, so this
+  shows the gotcha avoided, not which of the two did it. It is the first time a real worker used an
+  optional Acutis tool.
+- **Trigger** ($0.43): first look recorded trunk; a git commit to `packages/harness/package.json`
+  woke the Infrastructure scout exactly once (a second check found nothing to do). The scout read
+  the diff, judged it harmless, and then filed one high-confidence ticket about the rest of that
+  manifest: `npm run build -w packages/harness` fails (no tsconfig), entry points that don't exist,
+  undeclared dependencies on engine and tsx, and no typecheck of the harness.
+
 ### Workers run checks through Acutis (2026-11-22)
 
 - **The problem.** On Linux the worker's own shell (the Agent SDK's sandbox) blocks every Unix
