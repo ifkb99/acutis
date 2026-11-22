@@ -27,6 +27,8 @@ export interface Ticket {
   decision_id: number | null;
   /** The noticed report a scout turned into this ticket (marked ticketed once the ticket is accepted). */
   noticed_id: number | null;
+  /** The run that filed this ticket: a scout's propose_ticket, a worker's request_work or contract request, or a writer's saved draft. Null for operator tickets. */
+  origin_run_id: number | null;
   external_id: string | null;
   created_at: string;
   updated_at: string;
@@ -102,6 +104,7 @@ export interface TicketSource {
     confidence?: Ticket["confidence"];
     decision_id?: number | null;
     noticed_id?: number | null;
+    origin_run_id?: number | null;
   }): Ticket;
   /** Transactional claim: returns false if the ticket is not claimable. */
   claim(id: number): boolean;

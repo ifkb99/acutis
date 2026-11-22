@@ -4,7 +4,7 @@ import type { Ticket } from "../src/core/types";
 
 const ticket: Ticket = {
   id: 7, repo: "web", title: "Fix nav", body: "The nav overlaps on mobile.", status: "todo",
-  source: "local", external_id: null, confidence: null, decision_id: null, noticed_id: null, created_at: "", updated_at: "",
+  source: "local", external_id: null, confidence: null, decision_id: null, noticed_id: null, origin_run_id: null, created_at: "", updated_at: "",
 };
 
 test("parses front matter and template", () => {

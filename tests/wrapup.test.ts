@@ -111,7 +111,7 @@ describe("request_work (needs between areas)", () => {
     expect(prompt).toContain("mcp__acutis__request_work");
     expect(outs[0]).toMatch(/Filed as proposed ticket #(\d+)/);
     const filed = app.tickets.list({ repo: "demo" }).find((t) => t.source === "work-request")!;
-    expect(filed).toMatchObject({ status: "proposed", title: "Engine: export getMoves(tile)" });
+    expect(filed).toMatchObject({ status: "proposed", title: "Engine: export getMoves(tile)", origin_run_id: r1.id });
     expect(filed.body).toContain(`ticket #${t1.id} (AI per-tile eval) waits on it`);
     expect(filed.body).toContain("Worker-written");
     expect(app.store.events(r1.id).find((e) => e.kind === "work.request")!.data).toMatchObject({ ticket: filed.id, status: "proposed" });
@@ -120,6 +120,7 @@ describe("request_work (needs between areas)", () => {
     await waitFor(() => app.store.getRun(r2.id)!.state === "awaiting_review", 10000);
     expect(outs[1]).toContain(`Already requested as ticket #${filed.id}`);
     expect(app.tickets.list({ repo: "demo" }).filter((t) => t.source === "work-request").length).toBe(1);
+    expect(app.tickets.get(filed.id)!.origin_run_id).toBe(r1.id); // the first requester stays the origin
     expect(app.store.events(r2.id).find((e) => e.kind === "work.request")!.data).toMatchObject({ ticket: filed.id, existing: true });
 
     expect(app.runs.acceptTicket(filed.id).status).toBe("todo");

@@ -23,8 +23,8 @@ export class LocalTicketSource implements TicketSource {
   create(input: Parameters<TicketSource["create"]>[0]): Ticket {
     const row = this.store.db
       .query<{ id: number }, any>(
-        `INSERT INTO tickets (repo, title, body, source, status, confidence, decision_id, noticed_id)
-         VALUES ($repo, $title, $body, $source, $status, $confidence, $decision_id, $noticed_id) RETURNING id`,
+        `INSERT INTO tickets (repo, title, body, source, status, confidence, decision_id, noticed_id, origin_run_id)
+         VALUES ($repo, $title, $body, $source, $status, $confidence, $decision_id, $noticed_id, $origin_run_id) RETURNING id`,
       )
       .get({
         repo: input.repo,
@@ -35,6 +35,7 @@ export class LocalTicketSource implements TicketSource {
         confidence: input.confidence ?? null,
         decision_id: input.decision_id ?? null,
         noticed_id: input.noticed_id ?? null,
+        origin_run_id: input.origin_run_id ?? null,
       })!;
     return this.get(row.id)!;
   }
