@@ -539,7 +539,7 @@ function DecisionCard({
       <div className="title">{d.question}</div>
       {d.context && (
         <details>
-          <summary className="muted">Context (from the scout)</summary>
+          <summary className="muted">Context (from {d.asked_by === "worker" ? "a worker" : `the ${d.asked_by} scout`})</summary>
           <div className="detail">{d.context}</div>
         </details>
       )}

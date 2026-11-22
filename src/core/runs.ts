@@ -1026,10 +1026,13 @@ export class RunManager {
       if (!r.ok) failures.push(`$ ${describeGate(gate)}${"code" in r ? `  (exit ${r.code})` : ""}\n${r.output}`);
     }
     // A contract's own check runs when the run touches the contract or what depends on it.
+    if (!Object.keys(a.workflow.contracts).length) return failures;
     const touch = this.contractTouch(a.workflow, await this.deps.workspaces.changedFiles(a.repo, a.ws));
+    if (!still()) return null;
     for (const name of new Set([...touch.changes, ...touch.depends])) {
       const check = a.workflow.contracts[name]?.check;
-      if (!check || !still()) continue;
+      if (!check) continue;
+      if (!still()) return null;
       const gate: CommandGate = { kind: "cmd", name: `contract ${name}`, run: check };
       const r = await this.runCommand(runId, a, gate, "gate", still);
       if (!still()) return null;
@@ -1398,7 +1401,14 @@ export class RunManager {
         if (!change) return { text: "change is empty", isError: true };
         const question = `Change the ${name} contract: ${change}`;
         const known = this.deps.store.findDecisionByQuestion(x.repo.name, question);
-        if (known) return { text: `Already requested as decision #${known.id} (${known.status}).` };
+        if (known) {
+          return {
+            text:
+              known.status === "decided"
+                ? `Already decided (decision #${known.id}): ${known.decision}`
+                : `Already requested as decision #${known.id} (${known.status}).`,
+          };
+        }
         x.contractRequests++;
         const d = this.deps.store.addDecision({
           repo: x.repo.name,
@@ -1983,7 +1993,7 @@ ${this.workSnapshot(repo)}${gapList}`;
   }
 
   /** Queue a message. If the session is not live, resume it with this message. */
-  async message(runId: number, text: string, mode: "message" | "redirect" = "message") {
+  async message(runId: number, text: string, mode: "message" | "redirect" = "message", by: "operator" | "acutis" = "operator") {
     if (!text.trim()) throw new RunError("message is empty");
     const run = this.mustGet(runId);
     if (run.state === "verifying" || run.state === "landing" || run.state === "preparing" || run.state === "queued") {
@@ -1992,7 +2002,7 @@ ${this.workSnapshot(repo)}${gapList}`;
     if (run.state === "done" || run.state === "cancelled") throw new RunError(`run is ${run.state}`, 409);
 
     const a = this.active.get(runId);
-    this.deps.hub.emit(runId, "user.message", { text, mode, by: "operator" });
+    this.deps.hub.emit(runId, "user.message", { text, mode, by });
 
     if (a?.session) {
       if (mode === "redirect" && run.state === "running") {
@@ -2053,11 +2063,29 @@ ${this.workSnapshot(repo)}${gapList}`;
   async approve(runId: number, opts: { acceptContracts?: boolean } = {}): Promise<{ landed: boolean; reason?: string }> {
     const run = this.mustGet(runId);
     if (run.state !== "awaiting_review") throw new RunError(`can't approve a run that is ${run.state}`, 409);
+    // Checking contracts awaits jj before the run is marked landing: a second approve (a double
+    // click) must not slip into that gap.
+    if (this.approving.has(runId)) throw new RunError(`run ${runId} is already being approved`, 409);
+    this.approving.add(runId);
+    try {
+      return await this.approveOnce(runId, opts);
+    } finally {
+      this.approving.delete(runId);
+    }
+  }
+
+  private approving = new Set<number>();
+
+  private async approveOnce(runId: number, opts: { acceptContracts?: boolean }): Promise<{ landed: boolean; reason?: string }> {
     const a = await this.rehydrate(runId);
     if (!opts.acceptContracts && Object.keys(a.workflow.contracts).length) {
       // From the workspace as it is now, not from what verify saw.
       const touch = this.contractTouch(a.workflow, await this.deps.workspaces.changedFiles(a.repo, a.ws));
       if (touch.changes.length) {
+        this.deps.hub.emit(runId, "contract.changed", {
+          contracts: touch.changes,
+          msg: `This change edits the ${touch.changes.join(", ")} contract${touch.changes.length > 1 ? "s" : ""}. Approving it needs explicit acceptance.`,
+        });
         throw new RunError(
           `this run changes the ${touch.changes.join(", ")} contract${touch.changes.length > 1 ? "s" : ""}. Review the change, then approve with acceptContracts (acutis approve ${runId} --contracts).`,
           409,
@@ -2067,6 +2095,11 @@ ${this.workSnapshot(repo)}${gapList}`;
         const trunk = await this.deps.workspaces.resolve(a.repo, a.repo.base);
         const stale = await this.staleContracts(a.repo, a.workflow, touch.depends, a.ws.baseCommit, trunk);
         if (stale.length) {
+          this.deps.hub.emit(runId, "contract.stale", {
+            contracts: stale,
+            phase: "approve",
+            msg: `The ${stale.join(", ")} contract${stale.length > 1 ? "s" : ""} changed on ${a.repo.base} since this run started, and this repo lands as a bookmark (no rebase). Check the run against the new contract before accepting.`,
+          });
           throw new RunError(
             `the ${stale.join(", ")} contract${stale.length > 1 ? "s" : ""} changed on ${a.repo.base} since this run started. This repo lands as a bookmark, so the run isn't rebased: check it against the new contract, then approve with acceptContracts (acutis approve ${runId} --contracts).`,
             409,
@@ -2074,6 +2107,7 @@ ${this.workSnapshot(repo)}${gapList}`;
         }
       }
     }
+    if (this.mustGet(runId).state !== "awaiting_review") throw new RunError(`can't approve a run that is ${this.mustGet(runId).state}`, 409);
     this.setState(runId, "landing");
     // Landings in one repo are serialised: each trunk landing must see the previous one.
     const prev = this.landing.get(a.repo.name) ?? Promise.resolve();
@@ -2112,6 +2146,7 @@ ${this.workSnapshot(repo)}${gapList}`;
         const touch = this.contractTouch(trunkWf, await workspaces.changedFiles(a.repo, a.ws));
         changedContracts = touch.changes;
         if (touch.changes.length && !opts.acceptContracts) {
+          hub.emit(runId, "contract.changed", { contracts: touch.changes, msg: `This change edits the ${touch.changes.join(", ")} contract, as declared on the new ${a.repo.base}. Approving it needs explicit acceptance.` });
           return back(`this run changes the ${touch.changes.join(", ")} contract (as declared on the new ${a.repo.base}); review it, then approve with acceptContracts`);
         }
         const stale = await this.staleContracts(a.repo, trunkWf, touch.depends, oldBase, trunk);
@@ -2193,7 +2228,7 @@ ${this.workSnapshot(repo)}${gapList}`;
     ].join("\n");
     // After this landing settles, so the run is in review when the message relaunches it.
     queueMicrotask(() => {
-      this.message(runId, text).catch((e) =>
+      this.message(runId, text, "message", "acutis").catch((e) =>
         hub.emit(runId, "system.log", { level: "error", msg: `couldn't send the contract change to the agent: ${(e as Error).message}; send it with acutis msg` }),
       );
     });

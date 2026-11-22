@@ -151,6 +151,59 @@ describe("contracts", () => {
     app2.runs.shutdown();
   });
 
+  test("two approves fired together: one lands, the other is refused", async () => {
+    const { app, ticket } = await setup([usesOldContract], "bookmark");
+    const b = await app.runs.start(ticket("greet y").id);
+    await until(app, b.id, "awaiting_review");
+    const results = await Promise.allSettled([app.runs.approve(b.id), app.runs.approve(b.id)]);
+    expect(results.filter((r) => r.status === "fulfilled").length).toBe(1);
+    expect(results.find((r) => r.status === "rejected")!.reason.message).toMatch(/already being approved|can't approve/);
+    expect(state(app, b.id)).toBe("done");
+  });
+
+  test("a contract trunk declares while the run waits: editing its files needs acceptance at landing", async () => {
+    const editsFile: FakeScript = async (c) => {
+      writeFileSync(join(c.spec.cwd, "src/util.ts"), "export const u = 2;\n");
+      c.result();
+      await c.nextMessage();
+    };
+    const { app, repoPath, ticket } = await setup([editsFile]);
+    await Bun.write(join(repoPath, "src/util.ts"), "export const u = 1;\n");
+    await $`jj commit -m util && jj bookmark set main -r @-`.cwd(repoPath).quiet();
+    const r = await app.runs.start(ticket("util").id);
+    await until(app, r.id, "awaiting_review");
+    // Trunk now declares src/util.ts a contract.
+    await Bun.write(join(repoPath, ".acutis/workflow.md"), workflow("trunk", '  util:\n    files: ["src/util.ts"]\n'));
+    await $`jj commit -m declare && jj bookmark set main -r @-`.cwd(repoPath).quiet();
+    await expect(app.runs.approve(r.id)).rejects.toThrow(/as declared on the new main/);
+    expect(app.store.events(r.id).some((e) => e.kind === "contract.changed")).toBe(true); // the dashboard shows its box
+    expect((await app.runs.approve(r.id, { acceptContracts: true })).landed).toBe(true);
+  });
+
+  test("a contract the run's base didn't have counts as changed when it touches its consumers", async () => {
+    let told = "";
+    const adapts: FakeScript = async (c) => {
+      told = c.spec.prompt;
+      c.result();
+      await c.nextMessage();
+    };
+    const usesSchema: FakeScript = async (c) => {
+      writeFileSync(join(c.spec.cwd, "src/app.ts"), `${APP}// uses the schema\n`);
+      c.result();
+      await c.nextMessage();
+    };
+    const { app, repoPath, ticket } = await setup([usesSchema, adapts]);
+    const r = await app.runs.start(ticket("schema use").id);
+    await until(app, r.id, "awaiting_review");
+    await Bun.write(join(repoPath, "src/schema.ts"), "export type S = { a: number };\n");
+    await Bun.write(join(repoPath, ".acutis/workflow.md"), workflow("trunk", '  schema:\n    files: ["src/schema.ts"]\n    consumers: ["src/app.ts"]\n'));
+    await $`jj commit -m schema && jj bookmark set main -r @-`.cwd(repoPath).quiet();
+    const out = await app.runs.approve(r.id);
+    expect(out.landed).toBe(false);
+    expect(out.reason).toContain("schema contract changed");
+    await waitFor(() => told.includes("+export type S"), 10000);
+  });
+
   test("the contract's check runs when a run touches its consumers", async () => {
     const { app, ticket } = await setup([usesOldContract], "bookmark", '    check: "grep -q greet src/app.ts && echo contract-ok"\n');
     const b = await app.runs.start(ticket("greet y").id);

@@ -374,7 +374,8 @@ export class Library {
     this.db.transaction(() => {
       this.db.query("DELETE FROM library WHERE repo = ? AND kind = 'decision'").run(repo);
       for (const d of decisions) {
-        const body = d.question ? `${d.decision}\n\n(Answers a question the ${d.asked_by} scout asked: ${d.question})` : d.decision;
+        const who = d.asked_by === "worker" ? "a worker" : d.asked_by === "operator" ? "the operator" : `the ${d.asked_by} scout`;
+        const body = d.question ? `${d.decision}\n\n(Answers a question ${who} asked: ${d.question})` : d.decision;
         insert.run("Operator decision", body, repo, `decision #${d.id}`);
       }
     })();
