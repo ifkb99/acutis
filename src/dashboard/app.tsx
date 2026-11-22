@@ -517,22 +517,20 @@ function DraftCard({ d, onAct, onOpenRun }: { d: Draft; onAct: (id: number, acti
   const [title, setTitle] = useState(d.draft?.title ?? "");
   const [body, setBody] = useState(d.draft?.body ?? "");
   const [editing, setEditing] = useState(false);
-  // Your edits are kept when the writer revises; you choose whether to take the new version.
-  const edited = Boolean(d.draft) && (title !== d.draft!.title || body !== d.draft!.body);
-  const [shown, setShown] = useState(d.draft?.version ?? 0);
-  useEffect(() => {
-    if (!d.draft || d.draft.version === shown) return;
-    if (!edited || !shown) {
-      setTitle(d.draft.title);
-      setBody(d.draft.body);
-      setShown(d.draft.version);
-    }
-  }, [d.draft?.version]);
-  const takeLatest = () => {
-    setTitle(d.draft!.title);
-    setBody(d.draft!.body);
-    setShown(d.draft!.version);
+  // The version loaded into the fields. Your edits (fields differing from it) are kept when the
+  // writer revises; untouched fields follow the latest version.
+  const [base, setBase] = useState(d.draft ?? null);
+  const shown = base?.version ?? 0;
+  const edited = Boolean(base) && (title !== base!.title || body !== base!.body);
+  const load = (v: NonNullable<Draft["draft"]>) => {
+    setTitle(v.title);
+    setBody(v.body);
+    setBase(v);
   };
+  useEffect(() => {
+    if (d.draft && d.draft.version !== shown && !edited) load(d.draft);
+  }, [d.draft?.version]);
+  const takeLatest = () => load(d.draft!);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [decide, setDecide] = useState<Record<number, boolean>>({});
   const [note, setNote] = useState("");
@@ -649,7 +647,7 @@ function DraftCard({ d, onAct, onOpenRun }: { d: Draft; onAct: (id: number, acti
         ) : (
           <>
             {(canSend || d.questions.length > 0) && (
-              <button className="btn" disabled={!canSend} onClick={send}>
+              <button className="btn draft-send" disabled={!canSend} onClick={send}>
                 {d.questions.length ? "Send answers" : "Revise"}
               </button>
             )}

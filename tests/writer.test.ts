@@ -236,29 +236,64 @@ describe("ticket writer", () => {
     expect(why.reason).toBe("finished without a draft");
   });
 
-  test("answering after Stop (the session still open) starts a new round: a fresh question limit", async () => {
+  test("answering after Stop starts a new round in a resumed session: a fresh question limit and spend cap", async () => {
     const replies: string[] = [];
     const asks: FakeScript = async (c) => {
       for (let i = 0; i < 6; i++) await call(c, "ask_user", { question: `q${i}?` });
       replies.push(await call(c, "ask_user", { question: "one too many?" }));
       await call(c, "write_draft", { title: "T", body: "B" });
       await c.interrupted();
-      c.result("error_during_execution");
-      await c.nextMessage();
-      replies.push(await call(c, "ask_user", { question: "round two?" }));
-      c.result();
+      c.result("error_during_execution", 0.3);
       await c.nextMessage();
     };
-    const { app, runner } = await setup([asks]);
+    let resumed: string | undefined;
+    let cap: number | undefined;
+    const round2: FakeScript = async (c) => {
+      resumed = c.spec.resumeSessionId;
+      cap = c.spec.maxBudgetUsd;
+      replies.push(await call(c, "ask_user", { question: "round two?" }));
+      c.result("success", 0.35);
+      await c.nextMessage();
+    };
+    const { app, runner } = await setup([asks, round2]);
     const run = await app.runs.startDraft("demo", "many questions");
     await waitFor(() => app.runs.draft(run.id).draft, 10000);
     await app.runs.pause(run.id);
     await until(app, run.id, "paused");
+    const session = app.store.getRun(run.id)!.session_id;
     await app.runs.answerDraft(run.id, { answers: [{ n: 1, answer: "yes" }] });
     await waitFor(() => replies.length === 2, 10000);
-    expect(runner.sessions.length).toBe(1); // the same, still-open session
+    expect(runner.sessions.length).toBe(2);
+    expect(runner.sessions[0]!.closed).toBe(true);
+    expect(resumed).toBe(session!);
+    expect(cap).toBeCloseTo(0.8); // this round's $0.50 on top of the resumed session's $0.30
     expect(replies[0]).toContain("the limit");
     expect(replies[1]).toContain("Recorded as Q1");
+  });
+
+  test("a failed writer keeps its workspace: an answer continues it, and its draft can be saved", async () => {
+    const crashes: FakeScript = async (c) => {
+      await call(c, "ask_user", { question: "Which?" });
+      await call(c, "write_draft", { title: "T", body: "B" });
+      throw new Error("agent process died");
+    };
+    const continues: FakeScript = async (c) => {
+      await call(c, "write_draft", { title: "T2", body: "B2" });
+      c.result();
+      await c.nextMessage();
+    };
+    const { app } = await setup([crashes, continues]);
+    const run = await app.runs.startDraft("demo", "x");
+    await until(app, run.id, "failed");
+    const ws = app.store.getRun(run.id)!.workspace_path!;
+    expect(existsSync(ws)).toBe(true);
+    expect(app.runs.listDrafts().map((d) => [d.run.state, d.draft?.title])).toEqual([["failed", "T"]]);
+    await app.runs.answerDraft(run.id, { answers: [{ n: 1, answer: "That one." }] });
+    await until(app, run.id, "paused");
+    expect(app.runs.draft(run.id).draft?.title).toBe("T2");
+    await app.runs.saveDraft(run.id, {});
+    expect(visibleTickets(app).map((t) => t.title)).toEqual(["T2"]);
+    await waitFor(() => !existsSync(ws), 10000);
   });
 
   test("a draft waits for a run slot like any run", async () => {

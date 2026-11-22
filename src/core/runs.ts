@@ -2185,9 +2185,10 @@ export class RunManager {
     const note = clip(input.note, 4000);
     if (!answers.size && !note) throw new RunError("answer a question or write a note");
     for (const d of decide) this.addDecision(run.repo, d, "writer");
-    // A new round: its own budget and question limit (launch resets these too, for a resumed session).
+    // Every round starts in launch (a session still open after Stop is closed and resumed), which
+    // gives it its own budget, SDK spend cap and question limit.
     const a = this.active.get(runId);
-    if (a) Object.assign(a, { roundStartCost: run.cost_usd, writerQuestions: 0, writerNudged: false, budgetStop: false });
+    if (a?.session) this.closeSession(a);
     this.deps.hub.emit(runId, "writer.answered", { answers: [...answers].map(([n, answer]) => ({ n, answer })), note, decisions: decide.length });
     await this.message(runId, answersMessage(view.questions, answers, note));
     return this.mustGet(runId);
