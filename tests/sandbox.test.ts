@@ -14,7 +14,10 @@ test("worker commands get the daemon's environment minus credentials", () => {
   expect(env).toEqual({ PATH: "/bin", HOME: "/h", XAUTHORITY: "/x", LANG: "C", CI: "1" });
 });
 
-const usable = probeSandbox().ok;
+// Inside Acutis's own check sandbox (Acutis checking itself) or a worker's shell, these tests would
+// nest bubblewrap, which can't work there; they run on the host.
+const nested = Boolean(process.env.ACUTIS_SANDBOXED || process.env.ACUTIS_WORKER);
+const usable = probeSandbox().ok && !nested;
 
 describe.skipIf(!usable)("BwrapSandbox (real bubblewrap)", () => {
   const home = tempDir("acutis-sbx-home-");

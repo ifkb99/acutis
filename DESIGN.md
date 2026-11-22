@@ -243,6 +243,23 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Acutis on itself (2026-11-22)
+
+- **Its own workflow.** `.acutis/workflow.md` sets `bun install` as the setup step, typecheck and
+  `bun test` as checks, and `bun scripts/preview.ts` as the preview. Workers edit a separate clone
+  added as a repo, never the checkout the daemon runs from (principle 2).
+- **The preview** is the dashboard on `$PORT` with demo data made through the real run manager and
+  scripted agents. It has a temp home, a fixed token (`preview`, so its path is `/#token=preview`)
+  and a small demo repo. Past the scripted sessions, any run started from the preview gets a short
+  canned reply. Seeding finishes before the server answers, so the first page a check opens is
+  complete. Inside the check sandbox it is ready in about a second. A smoke test keeps the demo data
+  in step with the app.
+- **The worker prompt** names a preview's start page when it isn't `/`, because the token travels
+  in the URL fragment.
+- **Checks inside the sandbox** get `ACUTIS_SANDBOXED=1`. Tests of the sandbox itself skip under it
+  (and in a worker's shell), because they would nest bubblewrap. They run on the host. In the
+  sandbox, a clean clone gives 192 passing tests and 8 skipped, in 83 s.
+
 ### The ticket writer (2026-11-22)
 
 **Draft with agent** in the New ticket form (or `acutis draft <repo> <request>`) turns a rough

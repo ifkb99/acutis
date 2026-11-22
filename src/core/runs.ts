@@ -1112,7 +1112,9 @@ export class RunManager {
       cwd: a.ws.path,
       stdout: "pipe",
       stderr: "pipe",
-      env: phase !== "setup" ? workerEnv({ CI: "1" }) : { ...process.env, CI: "1" },
+      // ACUTIS_SANDBOXED tells a check it is already inside Acutis's sandbox (e.g. so tests of the
+      // sandbox itself, which would nest bubblewrap, can skip).
+      env: phase !== "setup" ? workerEnv({ CI: "1", ...(sandbox ? { ACUTIS_SANDBOXED: "1" } : {}) }) : { ...process.env, CI: "1" },
     });
     a.gate = proc;
     const timer = setTimeout(() => killGroup(proc), (step.timeout_s ?? 600) * 1000);
