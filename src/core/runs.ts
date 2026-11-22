@@ -20,6 +20,7 @@ import {
   MAX_LESSON_CHARS,
   PICK_SYSTEM,
   draftPrompt,
+  extractLessonPaths,
   fitBudget,
   lessonKey,
   parseDraft,
@@ -226,6 +227,15 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
 }
 /** Agent-written text that Acutis stores or passes on: trimmed, capped, and with credentials redacted. */
 const clip = (s: unknown, n: number) => redactSecrets(String(s ?? "")).trim().slice(0, n);
+/** Comma-separated paths/globs from an agent or operator: trimmed, relative, at most 10 (null if none). */
+const cleanPaths = (v: unknown): string | null => {
+  const ps = String(v ?? "")
+    .split(",")
+    .map((p) => p.trim().replace(/^\.?\//, ""))
+    .filter((p) => p && !p.startsWith("..") && !p.includes("\0"))
+    .slice(0, 10);
+  return ps.length ? ps.join(",") : null;
+};
 
 const unavailableBrowser: BrowserProvider = {
   available: false,
@@ -1198,7 +1208,9 @@ export class RunManager {
     const cfg = a.workflow.lessons;
     if (!cfg) return;
     try {
-      const approved = this.deps.store.listLessons({ repo: a.repo.name, status: "approved" });
+      await this.checkLessons(a.repo.name, runId).catch(() => {});
+      // A lesson whose files changed on trunk waits for the operator before it's given again.
+      const approved = this.deps.store.listLessons({ repo: a.repo.name, status: "approved" }).filter((l) => !l.stale);
       if (!approved.length) return;
       const ranked = rankLessons(approved, ticketText);
       let chosen = fitBudget(ranked, cfg.budget_chars);
@@ -1241,11 +1253,12 @@ export class RunManager {
     evidence: string,
     tags: string,
     source: string,
+    paths: string | null = null,
   ): { lesson: Lesson; existing: boolean } {
     const key = lessonKey(text);
     const known = this.deps.store.findLessonByKey(repo, key);
     if (known) return { lesson: known, existing: true };
-    const lesson = this.deps.store.addLesson({ repo, text, text_key: key, evidence, tags, status: "proposed", source, run_id: runId });
+    const lesson = this.deps.store.addLesson({ repo, text, text_key: key, evidence, tags, status: "proposed", source, run_id: runId, paths });
     if (runId !== null) this.deps.hub.emit(runId, "lesson.proposed", { id: lesson.id, text: lesson.text, source, status: "proposed" });
     return { lesson, existing: false };
   }
@@ -1339,6 +1352,7 @@ export class RunManager {
         lesson: { type: "string", description: `One or two sentences phrased as an instruction (under ${MAX_LESSON_CHARS} characters), e.g. "Build packages/engine before running the harness tests: the harness imports engine/dist."` },
         evidence: { type: "string", description: "What happened that shows it: the command, its output, file:line." },
         tags: { type: "string", description: "A few comma-separated words it's about (e.g. \"harness, build\").", optional: true },
+        paths: { type: "string", description: "Comma-separated repo paths or globs it's about (e.g. \"packages/harness/package.json\"). When they change, the operator rechecks the lesson.", optional: true },
       },
       handler: async (args): Promise<ToolOutput> => {
         const x = a();
@@ -1349,7 +1363,7 @@ export class RunManager {
         if (!known && x.lessonProposals >= MAX_LESSON_PROPOSALS_PER_RUN) {
           return { text: `This run already proposed ${MAX_LESSON_PROPOSALS_PER_RUN} lessons.`, isError: true };
         }
-        const { lesson, existing } = this.proposeLesson(runId, x.repo.name, text, clip(args.evidence, 2000), clip(args.tags, 200), source);
+        const { lesson, existing } = this.proposeLesson(runId, x.repo.name, text, clip(args.evidence, 2000), clip(args.tags, 200), source, cleanPaths(args.paths));
         if (!existing) {
           x.lessonProposals++;
           return { text: `Proposed as lesson L${lesson.id}. The operator will review it.` };
@@ -1393,11 +1407,67 @@ export class RunManager {
     return this.deps.store.updateLesson(id, { status: "approved", ...this.lessonText(l, text) });
   }
 
-  /** Reword an approved lesson. Runs already started keep the text they were given. */
+  /** Reword an approved lesson (which also counts as rechecking it). Runs already started keep the text they were given. */
   editLesson(id: number, text: string): Lesson {
     const l = this.mustLesson(id);
     if (l.status !== "approved" && l.status !== "proposed") throw new RunError(`lesson L${id} is ${l.status}`, 409);
-    return this.deps.store.updateLesson(id, this.lessonText(l, text));
+    this.deps.store.updateLesson(id, this.lessonText(l, text));
+    return l.stale ? this.deps.store.setLessonWatch(id, { stale: null, seen_commit: null }) : this.mustLesson(id);
+  }
+
+  /** The operator rechecked a lesson whose files changed: still true. It's given again, watched from trunk now. */
+  confirmLesson(id: number): Lesson {
+    const l = this.mustLesson(id);
+    if (l.status !== "approved") throw new RunError(`lesson L${id} is ${l.status}, not approved`, 409);
+    return this.deps.store.setLessonWatch(id, { stale: null, seen_commit: null });
+  }
+
+  /** Set the paths a lesson is about ("" to watch nothing). */
+  setLessonPaths(id: number, paths: string): Lesson {
+    this.mustLesson(id);
+    return this.deps.store.setLessonWatch(id, { paths: cleanPaths(paths) ?? "", seen_commit: null, stale: null });
+  }
+
+  /**
+   * Flag approved lessons whose paths changed on trunk since they were last checked. Paths come
+   * from the proposer or the operator, or are derived once from file names in the lesson's text and
+   * evidence. The first look at a lesson records trunk. Never throws for one bad lesson.
+   */
+  async checkLessons(repoName: string, runId?: number): Promise<Lesson[]> {
+    const repo = this.deps.store.getRepo(repoName);
+    if (!repo) return [];
+    const watched = this.deps.store.listLessons({ repo: repoName, status: "approved" }).filter((l) => !l.stale);
+    if (!watched.length) return [];
+    const cur = await this.deps.workspaces.resolve(repo, repo.base);
+    let files: string[] | null = null;
+    const flagged: Lesson[] = [];
+    for (let l of watched) {
+      try {
+        if (l.paths === null) {
+          files ??= await this.deps.workspaces.listFiles(repo, cur);
+          l = this.deps.store.setLessonWatch(l.id, { paths: extractLessonPaths(`${l.text}\n${l.evidence}`, files).join(",") });
+        }
+        const globs = (l.paths ?? "").split(",").filter(Boolean);
+        if (!globs.length) continue;
+        if (!l.seen_commit) {
+          this.deps.store.setLessonWatch(l.id, { seen_commit: cur });
+          continue;
+        }
+        if (l.seen_commit === cur) continue;
+        const changed = await this.deps.workspaces.changedBetween(repo, l.seen_commit, cur, globs).catch(() => null);
+        if (changed === null) {
+          this.deps.store.setLessonWatch(l.id, { seen_commit: cur }); // the old commit is gone: watch from now
+        } else if (changed.length) {
+          flagged.push(this.deps.store.setLessonWatch(l.id, { stale: JSON.stringify({ paths: changed.slice(0, 20), commit: cur }) }));
+          if (runId !== undefined) this.deps.hub.emit(runId, "lesson.stale", { id: l.id, text: l.text, paths: changed.slice(0, 20) });
+        } else {
+          this.deps.store.setLessonWatch(l.id, { seen_commit: cur });
+        }
+      } catch (e) {
+        console.log(`acutis: couldn't check lesson L${l.id} on ${repoName}: ${(e as Error).message}`);
+      }
+    }
+    return flagged;
   }
 
   rejectLesson(id: number): Lesson {
@@ -1976,7 +2046,10 @@ export class RunManager {
   startTrunkWatch(intervalMs = 5 * 60_000) {
     this.stopTrunkWatch();
     const tick = () => {
-      for (const r of this.deps.store.listRepos()) void this.checkTriggers(r.name).catch(() => {});
+      for (const r of this.deps.store.listRepos()) {
+        void this.checkTriggers(r.name).catch(() => {});
+        void this.checkLessons(r.name).catch(() => {});
+      }
     };
     tick();
     this.trunkWatch = setInterval(tick, Number.isFinite(intervalMs) && intervalMs >= 30_000 ? intervalMs : 300_000);
@@ -2729,7 +2802,10 @@ ${this.workSnapshot(repo)}${gapList}`;
     hub.ticket(this.deps.tickets.setStatus(a.ticket.id, "done"));
     if (a.workflow.land === "trunk" && changedContracts.length) this.noticeContractChange(runId, a.repo.name, changedContracts);
     // Trunk moved: scouts watching what this landing touched may wake.
-    if (a.workflow.land === "trunk") void this.checkTriggers(a.repo.name).catch(() => {});
+    if (a.workflow.land === "trunk") {
+      void this.checkTriggers(a.repo.name).catch(() => {});
+      void this.checkLessons(a.repo.name, runId).catch(() => {});
+    }
     return { landed: true };
   }
 

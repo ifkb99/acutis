@@ -457,6 +457,12 @@ export interface Lesson {
   run_id: number | null;
   /** How many runs were given it. */
   uses: number;
+  /** Comma-separated paths/globs the lesson is about; null until derived from its text, "" if none. */
+  paths: string | null;
+  /** The trunk commit it was last checked against (approved lessons with paths). */
+  seen_commit: string | null;
+  /** JSON { paths, commit } once trunk changed its paths: it waits for the operator to recheck it. */
+  stale: string | null;
   created_at: string;
   updated_at: string;
   decided_at: string | null;

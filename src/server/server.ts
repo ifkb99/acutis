@@ -135,6 +135,8 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
       "/api/lessons/:id/edit": { POST: api(async (req) => runs.editLesson(Number(req.params.id), String((await body(req)).text ?? ""))) },
       "/api/lessons/:id/reject": { POST: api((req) => runs.rejectLesson(Number(req.params.id))) },
       "/api/lessons/:id/retire": { POST: api((req) => runs.retireLesson(Number(req.params.id))) },
+      "/api/lessons/:id/confirm": { POST: api((req) => runs.confirmLesson(Number(req.params.id))) },
+      "/api/lessons/:id/paths": { POST: api(async (req) => runs.setLessonPaths(Number(req.params.id), String((await body(req)).paths ?? ""))) },
       "/api/tickets/:id/accept": { POST: api((req) => runs.acceptTicket(Number(req.params.id))) },
       "/api/tickets/:id/reject": { POST: api((req) => runs.rejectTicket(Number(req.params.id))) },
       "/api/repos/:name/library": {

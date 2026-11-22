@@ -52,6 +52,30 @@ export function fitBudget(lessons: Lesson[], budget: number): Lesson[] {
   return out;
 }
 
+/**
+ * The repo paths a lesson's words name: tokens that look like paths and match a tracked file
+ * (exactly, or as a path suffix like `tests/smoke.ts` for `packages/harness/tests/smoke.ts`), or
+ * a directory holding tracked files (watched as `dir/**`). At most 10.
+ */
+export function extractLessonPaths(text: string, files: string[]): string[] {
+  const out = new Set<string>();
+  const tokens = text.match(/[A-Za-z0-9_.@-]+(?:\/[A-Za-z0-9_.@-]+)+\/?|[A-Za-z0-9_@-]+\.[A-Za-z0-9]{1,6}\b/g) ?? [];
+  for (const raw of tokens) {
+    const t = raw.replace(/^\.\//, "").replace(/\/$/, "");
+    if (t.length < 3 || /^\d+(\.\d+)*$/.test(t) || /^https?:/.test(t)) continue;
+    const exact = files.find((f) => f === t);
+    if (exact) {
+      out.add(exact);
+    } else {
+      const suffix = files.filter((f) => f.endsWith(`/${t}`));
+      if (suffix.length && suffix.length <= 3) suffix.forEach((f) => out.add(f));
+      else if (t.includes("/") && files.some((f) => f.startsWith(`${t}/`))) out.add(`${t}/**`);
+    }
+    if (out.size >= 10) break;
+  }
+  return [...out].slice(0, 10);
+}
+
 export const PICK_SYSTEM =
   "You choose which of a repo's lessons a coding agent should see before starting a ticket. Reply with the ids of the relevant lessons, most relevant first, comma-separated (e.g. `L3, L7`), or NONE. Nothing else.";
 

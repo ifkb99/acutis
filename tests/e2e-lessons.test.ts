@@ -31,3 +31,18 @@ test.skipIf(!chrome)("the Lessons panel shows a proposed lesson with its evidenc
   const out = JSON.parse(r.scriptResult!);
   expect(out).toEqual({ heading: "Lessons · 0 proposed", approved: "Approved · 2", items: 0 });
 }, 60000);
+
+test.skipIf(!chrome)("a lesson to recheck shows what changed, and Still true gives it back (headless Chrome)", async () => {
+  const l = app.runs.addLesson("l", "a.txt must stay one line long or the checks fail.");
+  app.store.setLessonWatch(l.id, { paths: "a.txt", seen_commit: "abc", stale: JSON.stringify({ paths: ["a.txt"], commit: "def" }) });
+  const r = await new ChromeBrowser(chrome).check({
+    url: `http://127.0.0.1:${port}/#token=${app.token}`,
+    steps: "waitfor .lesson-stale\nclick .lesson-stale .btn.primary\nwait 800",
+    script: `JSON.stringify({ heading: document.querySelector('.lessons h2')?.textContent, stale: document.querySelectorAll('.lesson-stale').length })`,
+    width: 1300,
+    height: 900,
+  });
+  expect(r.errors).toEqual([]);
+  expect(app.store.getLesson(l.id)!.stale).toBeNull();
+  expect(JSON.parse(r.scriptResult!)).toEqual({ heading: "Lessons · 0 proposed", stale: 0 });
+}, 60000);

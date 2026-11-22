@@ -45,6 +45,8 @@ Lessons (short how-tos approved lessons put in every worker's and scout's prompt
   acutis lesson reject|retire <id>             Reject a proposed lesson, or retire an approved one
   acutis lesson edit <id> <text>               Reword a lesson (runs already started keep their text)
   acutis lesson add <repo> <text>              Write a lesson yourself (approved as written)
+  acutis lesson confirm <id>                   A lesson whose files changed on trunk is still true: give it again
+  acutis lesson paths <id> <globs>             Set the files a lesson is about (comma-separated; "" for none)
 
 Runs
   acutis start <ticket-id> [--watch]           Start a run for a ticket
@@ -262,6 +264,8 @@ function formatEvent(e: { id: number; kind: string; data: any }): string | null 
       return `⚠ ${d.msg}`;
     case "lessons.given":
       return `  given ${(d.lessons ?? []).length} of ${d.of} approved lesson(s)${d.by === "all" ? "" : ` (chosen by ${d.by})`}`;
+    case "lesson.stale":
+      return `  lesson L${d.id} needs a recheck: trunk changed ${(d.paths ?? []).join(", ")}`;
     case "lesson.proposed":
       return `  proposed lesson L${d.id}${d.source === "draft" ? " (drafted from the report)" : ""}: ${d.text}`;
     case "work.request":
@@ -553,6 +557,10 @@ switch (cmd) {
     for (const l of shown.sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status) || b.id - a.id)) {
       console.log(`L${l.id}\t${l.status}\t${l.repo} · from ${l.source}${l.run_id ? ` (run ${l.run_id})` : ""}${l.status === "approved" ? ` · given to ${l.uses} run(s)` : ""}`);
       console.log(`\t${l.text}`);
+      if (l.stale) {
+        const st = JSON.parse(l.stale);
+        console.log(`\tRECHECK: trunk changed ${st.paths.join(", ")}; not given to runs until you confirm, edit or retire it (acutis lesson confirm ${l.id})`);
+      } else if (l.status === "approved" && l.paths) console.log(`\twatching: ${l.paths}`);
       if (l.status === "proposed" && l.evidence) console.log(`\tevidence: ${String(l.evidence).replace(/\s+/g, " ").slice(0, 300)}`);
       if (l.status === "proposed") console.log(`\tacutis lesson approve ${l.id} ["reworded text"] | acutis lesson reject ${l.id}`);
     }
@@ -564,6 +572,8 @@ switch (cmd) {
     if (sub === "approve") l = await post(`/api/lessons/${id()}/approve`, { text: rest.slice(1).join(" ") || undefined });
     else if (sub === "reject" || sub === "retire") l = await post(`/api/lessons/${id()}/${sub}`);
     else if (sub === "edit") l = await post(`/api/lessons/${id()}/edit`, { text: rest.slice(1).join(" ") });
+    else if (sub === "confirm") l = await post(`/api/lessons/${id()}/confirm`);
+    else if (sub === "paths") l = await post(`/api/lessons/${id()}/paths`, { paths: rest.slice(1).join(",") });
     else if (sub === "add") {
       const [repo, ...words] = rest;
       if (!repo || !words.length) die("usage: acutis lesson add <repo> <text>");

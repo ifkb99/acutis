@@ -287,3 +287,95 @@ test("proposed lessons are batched into the operator's notification", async () =
   await waitFor(() => sent.length > 0, 2000);
   expect(sent).toEqual(["Acutis: 1 question, 1 proposed ticket and 1 proposed lesson waiting for you"]);
 });
+
+describe("lessons expire when their files change", () => {
+  test("paths are pulled from the lesson's words: exact files, path suffixes, directories; not versions or URLs", async () => {
+    const { extractLessonPaths } = await import("../src/core/lessons");
+    const files = ["packages/harness/package.json", "packages/harness/tests/smoke.ts", "packages/engine/src/index.ts", "README.md"];
+    expect(
+      extractLessonPaths("Run `node --import tsx tests/smoke.ts`; packages/harness/package.json lacks tsx; see packages/engine, v1.2.3 and https://x.io/a/b", files).sort(),
+    ).toEqual(["packages/engine/**", "packages/harness/package.json", "packages/harness/tests/smoke.ts"]);
+    expect(extractLessonPaths("Use pnpm, never npm.", files)).toEqual([]);
+  });
+
+  async function trunkSetup(scripts: FakeScript[]) {
+    const { $ } = await import("bun");
+    const repoPath = await makeRepo({
+      "packages/harness/package.json": '{"name": "harness"}\n',
+      "src/a.ts": "export const a = 1;\n",
+      ".acutis/workflow.md": "---\nland: bookmark\nmax_attempts: 1\n---\n",
+    });
+    const app = createApp({ home: tempDir("acutis-home-"), port: 0 }, { runner: new FakeRunner(scripts) });
+    app.store.addRepo({ name: "demo", path: repoPath, base: "main" });
+    const commit = async (file: string, text: string) => {
+      await Bun.write(join(repoPath, file), text);
+      await $`jj commit -m ${file} && jj bookmark set main -r @-`.cwd(repoPath).quiet();
+    };
+    const run = async () => {
+      const r = await app.runs.start(app.tickets.create({ repo: "demo", title: "t", body: "" }).id);
+      await waitFor(() => app.store.getRun(r.id)!.state === "awaiting_review", 10000);
+      return r;
+    };
+    return { app, commit, run };
+  }
+
+  test("trunk changes a lesson's file: it's flagged, held back from prompts, and given again once confirmed", async () => {
+    const systems: string[] = [];
+    const sees: FakeScript = async (c) => {
+      systems.push(c.spec.systemAppend);
+      c.result();
+      await c.nextMessage();
+    };
+    const { app, commit, run } = await trunkSetup([sees, sees, sees, sees]);
+    const l = app.runs.addLesson("demo", "packages/harness/package.json doesn't declare tsx; use the hoisted one from packages/ai.");
+    await run();
+    expect(systems[0]).toContain(`- L${l.id}:`);
+    expect(app.store.getLesson(l.id)).toMatchObject({ paths: "packages/harness/package.json", stale: null });
+    expect(app.store.getLesson(l.id)!.seen_commit).toBeTruthy();
+
+    await commit("src/a.ts", "export const a = 2;\n"); // not the lesson's file
+    await run();
+    expect(systems[1]).toContain(`- L${l.id}:`);
+
+    await commit("packages/harness/package.json", '{"name": "harness", "devDependencies": {"tsx": "^4"}}\n');
+    const r3 = await run();
+    expect(systems[2]).not.toContain(`- L${l.id}:`);
+    expect(JSON.parse(app.store.getLesson(l.id)!.stale!).paths).toEqual(["packages/harness/package.json"]);
+    expect(app.store.events(r3.id).find((e) => e.kind === "lesson.stale")!.data).toMatchObject({ id: l.id });
+
+    app.runs.confirmLesson(l.id);
+    await run();
+    expect(systems[3]).toContain(`- L${l.id}:`);
+    expect(app.store.getLesson(l.id)!.stale).toBeNull();
+  });
+
+  test("proposers can name paths; the operator can set them, or clear them so a lesson never expires", async () => {
+    const proposes: FakeScript = async (c) => {
+      await tool(c, "propose_lesson").handler({ lesson: "The harness manifest needs a tsconfig before it builds.", evidence: "tsc prints help", paths: "packages/harness/package.json, ./packages/harness/tsconfig.json, ../etc/passwd" });
+      c.result();
+      await c.nextMessage();
+    };
+    const sees: FakeScript = async (c) => {
+      c.result();
+      await c.nextMessage();
+    };
+    const { app, commit, run } = await trunkSetup([proposes, sees, sees]);
+    await run();
+    const [p] = app.runs.listLessons("demo", "proposed");
+    expect(p!.paths).toBe("packages/harness/package.json,packages/harness/tsconfig.json");
+    app.runs.approveLesson(p!.id);
+    app.runs.setLessonPaths(p!.id, "");
+    await run();
+    await commit("packages/harness/package.json", "{}\n");
+    await run();
+    expect(app.store.getLesson(p!.id)!.stale).toBeNull();
+  });
+});
+
+test("lessons to recheck are batched into the operator's notification", async () => {
+  const sent: string[] = [];
+  const n = makeNotifier({ port: 1, batchQuietMs: 30, batchMaxMs: 200, sender: (title) => sent.push(title) });
+  n.handle({ type: "event", event: { id: 0, run_id: 1, ts: "", kind: "lesson.stale", data: { id: 1, paths: ["a"] } } } as unknown as HubMessage);
+  await waitFor(() => sent.length > 0, 2000);
+  expect(sent).toEqual(["Acutis: 1 lesson to recheck waiting for you"]);
+});

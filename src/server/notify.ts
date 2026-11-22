@@ -39,7 +39,7 @@ export function makeNotifier(opts: {
 
   // Questions for the operator and tickets waiting for them arrive in bursts (a scout files several
   // at once), so they are batched into one notification, sent when the burst settles.
-  const batch = { questions: [] as string[], proposed: 0, lessons: 0, first: 0 };
+  const batch = { questions: [] as string[], proposed: 0, lessons: 0, stale: 0, first: 0 };
   let timer: ReturnType<typeof setTimeout> | null = null;
   const flush = () => {
     if (timer) clearTimeout(timer);
@@ -47,11 +47,13 @@ export function makeNotifier(opts: {
     const q = batch.questions.length;
     const p = batch.proposed;
     const l = batch.lessons;
-    if (!q && !p && !l) return;
+    const st = batch.stale;
+    if (!q && !p && !l && !st) return;
     const parts = [
       q ? `${q} question${q > 1 ? "s" : ""}` : "",
       p ? `${p} proposed ticket${p > 1 ? "s" : ""}` : "",
       l ? `${l} proposed lesson${l > 1 ? "s" : ""}` : "",
+      st ? `${st} lesson${st > 1 ? "s" : ""} to recheck` : "",
     ].filter(Boolean);
     const lines = batch.questions.slice(0, 3).map((t) => `• ${t.slice(0, 120)}`);
     const said = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
@@ -59,11 +61,13 @@ export function makeNotifier(opts: {
     batch.questions = [];
     batch.proposed = 0;
     batch.lessons = 0;
+    batch.stale = 0;
     batch.first = 0;
   };
-  const queue = (question: string | null, what: "ticket" | "lesson" = "ticket") => {
+  const queue = (question: string | null, what: "ticket" | "lesson" | "stale" = "ticket") => {
     if (question) batch.questions.push(question);
     else if (what === "lesson") batch.lessons++;
+    else if (what === "stale") batch.stale++;
     else batch.proposed++;
     const now = Date.now();
     if (!batch.first) batch.first = now;
@@ -93,6 +97,8 @@ export function makeNotifier(opts: {
         queue(null);
       } else if (kind === "lesson.proposed") {
         queue(null, "lesson");
+      } else if (kind === "lesson.stale") {
+        queue(null, "stale");
       }
     },
     /** Send anything batched now and wait (up to timeoutMs) for webhook posts to finish: daemon shutdown. */

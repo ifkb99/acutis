@@ -324,6 +324,14 @@ There are two separate questions: where the agent loop runs, and where the app r
   error, timeout or reply without valid ids (only an explicit NONE means "none of them"). Selection happens once, at the run's start, and is stored in a
   `lessons.given` event: resumed sessions and send-backs reuse that exact text, so the system
   prompt never changes mid-run (and later edits don't reach a run already going).
+- **Expiry.** An approved lesson watches the paths it's about: given by the proposer
+  (`propose_lesson` `paths`) or the operator (`acutis lesson paths`), or derived once from repo
+  file names in its text and evidence (exact files, path suffixes, directories as `dir/**`). It
+  records the trunk commit it was last checked against; when trunk changes those paths it's
+  flagged "recheck" and held back from prompts until the operator confirms it (`acutis lesson
+  confirm`, "Still true"), edits it, or retires it. Checked at every run start, after trunk
+  landings, and on the daemon's trunk timer; flags reach the batched notifications. Lessons
+  naming no repo file never expire (and an operator can clear a lesson's paths for that).
 - **Operator.** Dashboard Lessons panel (approve with an edit box, reject, retire), `acutis lessons`
   / `acutis lesson approve|reject|retire|edit|add`. Proposed lessons join the batched
   notifications. `lessons: false` turns off the tool, drafting and the prompt section.

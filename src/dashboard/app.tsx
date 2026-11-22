@@ -171,7 +171,7 @@ function App() {
       const e = m.event;
       if (e.kind === "noticed") loadNoticed();
       if (e.kind.startsWith("scout.")) loadDecisions();
-      if (e.kind === "lesson.proposed") loadLessons();
+      if (e.kind === "lesson.proposed" || e.kind === "lesson.stale") loadLessons();
       if (e.kind === "permission.request") setPending((p) => new Map(p).set((e.data as any).id, e.run_id));
       else if (e.kind === "permission.decision") {
         setPending((p) => {
@@ -663,17 +663,40 @@ function LessonsPanel({
   onOpenRun,
 }: {
   items: Lesson[];
-  onAct: (id: number, action: "approve" | "reject" | "retire" | "edit", text?: string) => void;
+  onAct: (id: number, action: "approve" | "reject" | "retire" | "edit" | "confirm", text?: string) => void;
   onOpenRun: (runId: number) => void;
 }) {
   const proposed = items.filter((l) => l.status === "proposed");
-  const approved = items.filter((l) => l.status === "approved");
-  if (!proposed.length && !approved.length) return null;
+  const stale = items.filter((l) => l.status === "approved" && l.stale);
+  const approved = items.filter((l) => l.status === "approved" && !l.stale);
+  if (!proposed.length && !approved.length && !stale.length) return null;
   return (
-    <details className="col lessons" open={proposed.length > 0}>
+    <details className="col lessons" open={proposed.length + stale.length > 0}>
       <summary>
-        <h2 title="Short how-tos for a repo. Approved lessons go into every worker's and scout's instructions.">Lessons · {proposed.length} proposed</h2>
+        <h2 title="Short how-tos for a repo. Approved lessons go into every worker's and scout's instructions.">
+          Lessons · {proposed.length} proposed{stale.length ? ` · ${stale.length} to recheck` : ""}
+        </h2>
       </summary>
+      {stale.map((l) => (
+        <div className="card lesson-item lesson-stale" key={l.id}>
+          <div className="row">
+            <span className="chip needs">recheck</span>
+            <span className="muted">
+              L{l.id} · {l.repo} · trunk changed {(JSON.parse(l.stale!).paths as string[]).join(", ")}
+            </span>
+          </div>
+          <div>{l.text}</div>
+          <div className="muted">Not given to runs until you confirm it's still true, or retire it.</div>
+          <div className="row">
+            <button className="btn primary" onClick={() => onAct(l.id, "confirm")}>
+              Still true
+            </button>
+            <button className="btn" onClick={() => onAct(l.id, "retire")}>
+              Retire
+            </button>
+          </div>
+        </div>
+      ))}
       {proposed.map((l) => (
         <LessonCard key={l.id} l={l} onAct={onAct} onOpenRun={onOpenRun} />
       ))}
@@ -1219,6 +1242,12 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
           given {(d.lessons ?? []).length} of {d.of} approved lesson{d.of === 1 ? "" : "s"}
           {d.by === "all" ? "" : ` (chosen by ${d.by})`}
           {(d.lessons ?? []).length > 0 && `: ${(d.lessons as { id: number }[]).map((l) => `L${l.id}`).join(", ")}`}
+        </div>
+      );
+    case "lesson.stale":
+      return (
+        <div className="ev flag">
+          ⚠ Lesson L{d.id} needs a recheck: trunk changed <code>{(d.paths ?? []).join(", ")}</code>. It isn't given to runs until the operator confirms it.
         </div>
       );
     case "lesson.proposed":

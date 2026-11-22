@@ -141,6 +141,9 @@ export class Store {
     if (!has("tickets", "decision_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN decision_id INTEGER");
     if (!has("tickets", "noticed_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN noticed_id INTEGER");
     if (!has("runs", "woken_by")) this.db.exec("ALTER TABLE runs ADD COLUMN woken_by TEXT");
+    if (!has("lessons", "paths")) this.db.exec("ALTER TABLE lessons ADD COLUMN paths TEXT");
+    if (!has("lessons", "seen_commit")) this.db.exec("ALTER TABLE lessons ADD COLUMN seen_commit TEXT");
+    if (!has("lessons", "stale")) this.db.exec("ALTER TABLE lessons ADD COLUMN stale TEXT");
   }
 
   // ---- repos
@@ -376,11 +379,11 @@ export class Store {
   }
 
   // ---- lessons
-  addLesson(l: { repo: string; text: string; text_key: string; evidence?: string; tags?: string; status: Lesson["status"]; source: string; run_id?: number | null }): Lesson {
+  addLesson(l: { repo: string; text: string; text_key: string; evidence?: string; tags?: string; status: Lesson["status"]; source: string; run_id?: number | null; paths?: string | null }): Lesson {
     const row = this.db
       .query<{ id: number }, any>(
-        `INSERT INTO lessons (repo, text, text_key, evidence, tags, status, source, run_id, decided_at)
-         VALUES ($repo, $text, $text_key, $evidence, $tags, $status, $source, $run_id, $decided_at) RETURNING id`,
+        `INSERT INTO lessons (repo, text, text_key, evidence, tags, status, source, run_id, decided_at, paths)
+         VALUES ($repo, $text, $text_key, $evidence, $tags, $status, $source, $run_id, $decided_at, $paths) RETURNING id`,
       )
       .get({
         repo: l.repo,
@@ -392,6 +395,7 @@ export class Store {
         source: l.source,
         run_id: l.run_id ?? null,
         decided_at: l.status === "proposed" ? null : new Date().toISOString(),
+        paths: l.paths ?? null,
       })!;
     return this.getLesson(row.id)!;
   }
@@ -416,6 +420,14 @@ export class Store {
         "UPDATE lessons SET status = ?, text = ?, text_key = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), decided_at = CASE WHEN ? != status THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE decided_at END WHERE id = ?",
       )
       .run(status, patch.text ?? cur.text, patch.text_key ?? cur.text_key, status, id);
+    return this.getLesson(id)!;
+  }
+  /** Staleness bookkeeping: paths, the commit last checked, and the stale flag. */
+  setLessonWatch(id: number, patch: { paths?: string | null; seen_commit?: string | null; stale?: string | null }): Lesson {
+    for (const [k, v] of Object.entries(patch)) {
+      if (!["paths", "seen_commit", "stale"].includes(k)) continue;
+      this.db.query(`UPDATE lessons SET ${k} = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`).run(v ?? null, id);
+    }
     return this.getLesson(id)!;
   }
   countLessonUse(ids: number[]) {
