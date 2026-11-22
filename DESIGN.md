@@ -240,6 +240,31 @@ There are two separate questions: where the agent loop runs, and where the app r
   redirect, still works. The cost is that login credentials must be mounted
   into the container. Decide after the spike.
 
+### Lessons (2026-11-22, phase 5 of the scouts plan)
+
+- **Why push, not pull.** Real agents never called the optional knowledge tools (librarian 0 of 4
+  A/B runs; scouts never searched the library). So lessons go into the prompt instead of waiting
+  to be fetched.
+- **A lesson** is one or two sentences (≤300 characters), per repo, with evidence, a source
+  (`worker`, `scout:<type>`, `draft`, `operator`) and a status: proposed, approved, rejected,
+  retired. Dedupe is by normalised text across every status, so a rejected lesson isn't proposed
+  again.
+- **Sources.** `propose_lesson` for workers and scouts (three per run). And the push source: after a
+  worker run reaches review, a cheap model (the library model) reads its final report plus any
+  checks that failed on earlier attempts and proposes at most one lesson, or NONE. It runs after
+  review starts, capped at $0.03, with a timeout; it can't delay or fail the run, and its cost is
+  added to the run. Across 19 real runs on disk none needed a retry, so drafting only after
+  retries would almost never fire; the report is where agents mention workarounds.
+- **Only approved text reaches a prompt**, in its own section after the operator decisions. All
+  approved lessons go in if they fit `budget_chars` (default 1500); otherwise the cheap model picks
+  among the 40 best keyword matches (ids it invents are dropped), falling back to keywords on any
+  error or timeout. Selection happens once, at the run's start, and is stored in a
+  `lessons.given` event: resumed sessions and send-backs reuse that exact text, so the system
+  prompt never changes mid-run (and later edits don't reach a run already going).
+- **Operator.** Dashboard Lessons panel (approve with an edit box, reject, retire), `acutis lessons`
+  / `acutis lesson approve|reject|retire|edit|add`. Proposed lessons join the batched
+  notifications. `lessons: false` turns off the tool, drafting and the prompt section.
+
 ### Needs between areas (2026-11-22)
 
 - **`request_work(title, need, why)`** is for work a worker's ticket depends on that belongs

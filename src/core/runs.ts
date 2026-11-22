@@ -15,6 +15,19 @@ import {
 } from "./library";
 import { PreviewManager } from "./preview";
 import {
+  DRAFT_SYSTEM,
+  type GivenLesson,
+  MAX_LESSON_CHARS,
+  PICK_SYSTEM,
+  draftPrompt,
+  fitBudget,
+  lessonKey,
+  parseDraft,
+  parsePick,
+  pickPrompt,
+  rankLessons,
+} from "./lessons";
+import {
   DEFAULT_SCOUT_BUDGET_USD,
   MAX_SCOUT_DECISIONS,
   MAX_SCOUT_TICKETS,
@@ -28,6 +41,7 @@ import {
   scoutSystemPrompt,
 } from "./scouts";
 import type {
+  Lesson,
   AcutisTool,
   AgentRunner,
   AgentSession,
@@ -94,6 +108,11 @@ interface Active {
   librarianCount: number;
   contractRequests: number;
   workRequests: number;
+  lessonProposals: number;
+  /** Check failures from earlier attempts, for the lesson draft. */
+  priorFailures: string[];
+  /** The lessons this run's prompt carries (fixed for the run, so resumed sessions match). */
+  lessons?: GivenLesson[];
   /** Scout runs: setup and check results on trunk, what it filed, and whether its budget stopped it. */
   trunkResults?: string;
   scoutTickets: number;
@@ -154,6 +173,8 @@ const MAX_GAPS_PER_RUN = 5;
 const MAX_LIBRARIAN_PER_RUN = 8;
 const MAX_CONTRACT_REQUESTS_PER_RUN = 3;
 const MAX_WORK_REQUESTS_PER_RUN = 3;
+const MAX_LESSON_PROPOSALS_PER_RUN = 3;
+const LESSON_MODEL_TIMEOUT_MS = 30_000;
 const LIBRARIAN_TIMEOUT_MS = 120_000;
 
 /**
@@ -396,6 +417,8 @@ export class RunManager {
       librarianCount: 0,
       contractRequests: 0,
       workRequests: 0,
+      lessonProposals: 0,
+      priorFailures: [],
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -436,9 +459,13 @@ export class RunManager {
         results.push(`check ${g.name && g.name !== g.run ? `"${g.name}" ` : ""}\`${g.run}\`: ${r.ok ? "passes" : `FAILS (exit ${r.code})\n${tail(r.output, 1500)}`}`);
       }
       a.trunkResults = results.join("\n\n");
+      await this.selectLessons(run.id, a, `${SCOUT_TYPES[scout]!.title} ${settings!.focus}`);
+      if (!alive()) return;
       this.launch(run.id, this.scoutBrief(repo.name, scout, settings!.focus));
       return;
     }
+    await this.selectLessons(run.id, a, `${ticket.title}\n${ticket.body}`);
+    if (!alive()) return;
     this.launch(run.id, renderTemplate(workflow.template, ticket));
   }
 
@@ -691,6 +718,8 @@ export class RunManager {
       librarianCount: 0,
       contractRequests: 0,
       workRequests: 0,
+      lessonProposals: 0,
+      priorFailures: [],
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -708,6 +737,8 @@ export class RunManager {
     // Re-read the repo so operator notes edited since the run started reach the next session.
     a.repo = this.deps.store.getRepo(a.repo.name) ?? a.repo;
     const decisions = this.deps.store.listDecisions({ repo: a.repo.name, status: "decided" });
+    a.lessons ??= this.givenLessons(runId);
+    const lessons = a.lessons;
     const scout = run.kind === "scout" ? run.scout! : null;
     const settings = scout ? scoutSettings(a.workflow, scout) : null;
     const systemAppend = scout
@@ -723,6 +754,7 @@ export class RunManager {
           library: Boolean(a.workflow.library),
           librarian: Boolean(a.workflow.library && a.workflow.library.librarian && this.deps.oneShot),
           decisions,
+          lessons,
           trunkResults: a.trunkResults ?? "(not re-run after a restart; run the checks yourself if you need them)",
         })
       : workerSystemPrompt({
@@ -732,6 +764,7 @@ export class RunManager {
           repo: a.repo,
           sandboxed: this.deps.agentSandboxed,
           decisions,
+          lessons,
           librarian: Boolean(a.workflow.library && a.workflow.library.librarian && this.deps.oneShot),
         });
     const session = this.deps.runner.start({
@@ -1096,6 +1129,7 @@ export class RunManager {
     if (failures === null) return;
     const run = this.mustGet(runId);
     if (failures.length && run.attempt < a.workflow.max_attempts && a.session) {
+      a.priorFailures.push(...failures);
       hub.run(store.updateRun(runId, { attempt: run.attempt + 1, gates_ok: 0 }));
       const feedback = `Acutis ran the checks and ${failures.length} failed. Fix the cause (don't weaken the checks), then summarize again.\n\n${failures.join("\n\n")}`;
       hub.emit(runId, "user.message", { text: feedback, mode: "gate-feedback", by: "acutis" });
@@ -1108,6 +1142,210 @@ export class RunManager {
     this.closeSession(a);
     this.setState(runId, "awaiting_review", failures.length ? "checks still failing after max attempts" : undefined);
     hub.ticket(this.deps.tickets.setStatus(run.ticket_id, "review"));
+    // After review starts, never before: the draft must not delay or fail the run.
+    const draft: Promise<void> = this.draftLesson(runId, a.repo.name, a.workflow, a.ticket.title, [...a.priorFailures]).finally(() => this.lessonDrafts.delete(draft));
+    this.lessonDrafts.add(draft);
+  }
+
+  // ------------------------------------------------------------ lessons
+
+  /** Pending lesson drafts (tests and shutdown can wait for them). */
+  private lessonDrafts = new Set<Promise<void>>();
+  async lessonDraftsIdle() {
+    while (this.lessonDrafts.size) await Promise.allSettled([...this.lessonDrafts]);
+  }
+
+  /** The lessons a run was given at its start (a resumed session reuses them, text and all). */
+  private givenLessons(runId: number): GivenLesson[] {
+    const ev = this.deps.store.events(runId).filter((e) => e.kind === "lessons.given").at(-1);
+    return ((ev?.data as { lessons?: GivenLesson[] } | undefined)?.lessons ?? []).map((l) => ({ id: l.id, text: l.text }));
+  }
+
+  /**
+   * Choose the approved lessons for a run, once, at its start. All of them if they fit the budget;
+   * otherwise a cheap model picks among the best keyword matches, falling back to keywords alone.
+   * Never throws: lessons are help, not a reason for a run not to start.
+   */
+  private async selectLessons(runId: number, a: Active, ticketText: string): Promise<void> {
+    if (this.givenLessons(runId).length) return; // a restart re-preparing the run keeps what it had
+    a.lessons = [];
+    const cfg = a.workflow.lessons;
+    if (!cfg) return;
+    try {
+      const approved = this.deps.store.listLessons({ repo: a.repo.name, status: "approved" });
+      if (!approved.length) return;
+      const ranked = rankLessons(approved, ticketText);
+      let chosen = fitBudget(ranked, cfg.budget_chars);
+      let by = chosen.length === approved.length ? "all" : "keywords";
+      if (by === "keywords" && this.deps.oneShot) {
+        const candidates = ranked.slice(0, 40);
+        const timeout = new Promise<{ text: string; costUsd: number; error: string }>((r) =>
+          setTimeout(() => r({ text: "", costUsd: 0, error: "timeout" }), LESSON_MODEL_TIMEOUT_MS).unref?.(),
+        );
+        const r = await Promise.race([
+          this.deps.oneShot
+            .ask({ system: PICK_SYSTEM, prompt: pickPrompt(a.ticket, candidates), maxTurns: 1, maxBudgetUsd: 0.02, model: this.deps.libraryModel })
+            .catch((e) => ({ text: "", costUsd: 0, error: (e as Error).message })),
+          timeout,
+        ]);
+        this.addRunCost(runId, r.costUsd);
+        if (!r.error) {
+          const ids = parsePick(r.text, candidates.map((l) => l.id));
+          chosen = fitBudget(ids.map((id) => candidates.find((l) => l.id === id)!), cfg.budget_chars);
+          by = "model";
+        }
+      }
+      a.lessons = chosen.map((l) => ({ id: l.id, text: l.text }));
+      if (a.lessons.length) this.deps.store.countLessonUse(a.lessons.map((l) => l.id));
+      this.deps.hub.emit(runId, "lessons.given", { lessons: a.lessons, of: approved.length, by });
+    } catch (e) {
+      this.deps.hub.emit(runId, "system.log", { level: "warn", msg: `Lessons weren't added to the prompt: ${(e as Error).message}` });
+    }
+  }
+
+  /**
+   * Store a proposed lesson unless the repo already has it in any status (a rejected lesson isn't
+   * proposed again). Returns what happened, for the proposer.
+   */
+  private proposeLesson(
+    runId: number | null,
+    repo: string,
+    text: string,
+    evidence: string,
+    tags: string,
+    source: string,
+  ): { lesson: Lesson; existing: boolean } {
+    const key = lessonKey(text);
+    const known = this.deps.store.findLessonByKey(repo, key);
+    if (known) return { lesson: known, existing: true };
+    const lesson = this.deps.store.addLesson({ repo, text, text_key: key, evidence, tags, status: "proposed", source, run_id: runId });
+    if (runId !== null) this.deps.hub.emit(runId, "lesson.proposed", { id: lesson.id, text: lesson.text, source, status: "proposed" });
+    return { lesson, existing: false };
+  }
+
+  /** After a run reaches review: a cheap model reads its report and may propose one lesson. */
+  private async draftLesson(runId: number, repo: string, wf: Workflow, ticketTitle: string, failures: string[]): Promise<void> {
+    if (!wf.lessons || !wf.lessons.draft || !this.deps.oneShot) return;
+    try {
+      const report = String((this.deps.store.events(runId).filter((e) => e.kind === "agent.result").at(-1)?.data as any)?.result ?? "");
+      if (report.trim().length < 80 && !failures.length) return;
+      const existing = this.deps.store
+        .listLessons({ repo })
+        .filter((l) => l.status === "approved" || l.status === "proposed")
+        .slice(0, 30)
+        .map((l) => l.text);
+      const timeout = new Promise<{ text: string; costUsd: number; error: string }>((r) =>
+        setTimeout(() => r({ text: "", costUsd: 0, error: "timeout" }), LESSON_MODEL_TIMEOUT_MS * 2).unref?.(),
+      );
+      const r = await Promise.race([
+        this.deps.oneShot
+          .ask({ system: DRAFT_SYSTEM, prompt: draftPrompt({ repo, ticket: ticketTitle, report, failures, existing }), maxTurns: 1, maxBudgetUsd: 0.03, model: this.deps.libraryModel })
+          .catch((e) => ({ text: "", costUsd: 0, error: (e as Error).message })),
+        timeout,
+      ]);
+      this.addRunCost(runId, r.costUsd);
+      if (r.error) {
+        this.deps.hub.emit(runId, "system.log", { level: "warn", msg: `Lesson draft skipped: ${r.error}` });
+        return;
+      }
+      const d = parseDraft(r.text);
+      if (!d) return;
+      this.proposeLesson(runId, repo, redactSecrets(d.lesson), redactSecrets(d.evidence), "", "draft");
+    } catch (e) {
+      this.deps.hub.emit(runId, "system.log", { level: "warn", msg: `Lesson draft failed: ${(e as Error).message}` });
+    }
+  }
+
+  private lessonTool(runId: number, a: () => Active, source: string): AcutisTool {
+    return {
+      name: "propose_lesson",
+      description:
+        "Propose a short lesson about this repo for future agents: a build or test order, an environment quirk, a workaround the checks needed, a convention the checks enforce. " +
+        "Not about your ticket's own feature. The operator approves lessons; approved ones go into later agents' instructions.",
+      params: {
+        lesson: { type: "string", description: `One or two sentences phrased as an instruction (under ${MAX_LESSON_CHARS} characters), e.g. "Build packages/engine before running the harness tests: the harness imports engine/dist."` },
+        evidence: { type: "string", description: "What happened that shows it: the command, its output, file:line." },
+        tags: { type: "string", description: "A few comma-separated words it's about (e.g. \"harness, build\").", optional: true },
+      },
+      handler: async (args): Promise<ToolOutput> => {
+        const x = a();
+        const text = clip(String(args.lesson ?? "").replace(/\s+/g, " "), MAX_LESSON_CHARS);
+        if (text.length < 15) return { text: "lesson is empty or too short", isError: true };
+        const key = lessonKey(text);
+        const known = this.deps.store.findLessonByKey(x.repo.name, key);
+        if (!known && x.lessonProposals >= MAX_LESSON_PROPOSALS_PER_RUN) {
+          return { text: `This run already proposed ${MAX_LESSON_PROPOSALS_PER_RUN} lessons.`, isError: true };
+        }
+        const { lesson, existing } = this.proposeLesson(runId, x.repo.name, text, clip(args.evidence, 2000), clip(args.tags, 200), source);
+        if (!existing) {
+          x.lessonProposals++;
+          return { text: `Proposed as lesson L${lesson.id}. The operator will review it.` };
+        }
+        const said: Record<Lesson["status"], string> = {
+          approved: "is already an approved lesson",
+          proposed: "is already proposed",
+          rejected: "was proposed before and the operator rejected it",
+          retired: "was a lesson the operator retired",
+        };
+        return { text: `That ${said[lesson.status]} (L${lesson.id}).` };
+      },
+    };
+  }
+
+  // --- operator side
+  listLessons(repo?: string, status?: Lesson["status"]): Lesson[] {
+    return this.deps.store.listLessons({ repo, status });
+  }
+
+  /** An operator-written lesson: approved as written. */
+  addLesson(repo: string, text: string, tags = ""): Lesson {
+    if (!this.deps.store.getRepo(repo)) throw new RunError(`repo "${repo}" is not registered`, 404);
+    const t = text.replace(/\s+/g, " ").trim().slice(0, MAX_LESSON_CHARS);
+    if (t.length < 15) throw new RunError("lesson is empty or too short", 400);
+    const known = this.deps.store.findLessonByKey(repo, lessonKey(t));
+    if (known) return known.status === "approved" ? known : this.deps.store.updateLesson(known.id, { status: "approved" });
+    return this.deps.store.addLesson({ repo, text: t, text_key: lessonKey(t), tags, status: "approved", source: "operator" });
+  }
+
+  private mustLesson(id: number): Lesson {
+    const l = this.deps.store.getLesson(id);
+    if (!l) throw new RunError(`lesson L${id} not found`, 404);
+    return l;
+  }
+
+  /** Approve a proposed lesson, optionally rewording it first. */
+  approveLesson(id: number, text?: string): Lesson {
+    const l = this.mustLesson(id);
+    if (l.status !== "proposed") throw new RunError(`lesson L${id} is ${l.status}, not proposed`, 409);
+    return this.deps.store.updateLesson(id, { status: "approved", ...this.lessonText(l, text) });
+  }
+
+  /** Reword an approved lesson. Runs already started keep the text they were given. */
+  editLesson(id: number, text: string): Lesson {
+    const l = this.mustLesson(id);
+    if (l.status !== "approved" && l.status !== "proposed") throw new RunError(`lesson L${id} is ${l.status}`, 409);
+    return this.deps.store.updateLesson(id, this.lessonText(l, text));
+  }
+
+  rejectLesson(id: number): Lesson {
+    const l = this.mustLesson(id);
+    if (l.status !== "proposed") throw new RunError(`lesson L${id} is ${l.status}, not proposed`, 409);
+    return this.deps.store.updateLesson(id, { status: "rejected" });
+  }
+
+  retireLesson(id: number): Lesson {
+    const l = this.mustLesson(id);
+    if (l.status !== "approved") throw new RunError(`lesson L${id} is ${l.status}, not approved`, 409);
+    return this.deps.store.updateLesson(id, { status: "retired" });
+  }
+
+  private lessonText(l: Lesson, text?: string): { text?: string; text_key?: string } {
+    if (text === undefined || !text.trim()) return {};
+    const t = text.replace(/\s+/g, " ").trim().slice(0, MAX_LESSON_CHARS);
+    if (t.length < 15) throw new RunError("lesson is too short", 400);
+    const clash = this.deps.store.findLessonByKey(l.repo, lessonKey(t));
+    if (clash && clash.id !== l.id) throw new RunError(`that text is already lesson L${clash.id} (${clash.status})`, 409);
+    return { text: t, text_key: lessonKey(t) };
   }
 
   // ------------------------------------------------------------ agent tools
@@ -1123,6 +1361,7 @@ export class RunManager {
     if (wf?.library) tools.push(...this.libraryTools(runId, a));
     tools.push(this.noticedTool(runId, a));
     tools.push(this.workRequestTool(runId, a));
+    if (wf?.lessons) tools.push(this.lessonTool(runId, a, "worker"));
     if (wf && Object.keys(wf.contracts).length) tools.push(this.contractRequestTool(runId, a));
     tools.push(...this.previewTools(runId, a));
     return tools;
@@ -1756,6 +1995,7 @@ ${this.workSnapshot(repo)}${gapList}`;
     const wf = this.active.get(runId)?.workflow;
     const tools: AcutisTool[] = wf?.library ? this.libraryTools(runId, a) : [];
     if (SCOUT_TYPES[type]?.needs === "preview") tools.push(...this.previewTools(runId, a));
+    if (wf?.lessons) tools.push(this.lessonTool(runId, a, `scout:${type}`));
     const ownOpen = (x: Active, id: unknown): Decision | string => {
       const d = this.deps.store.getDecision(Number(id));
       if (!d || d.repo !== x.repo.name) return `No decision #${id} in this repo.`;

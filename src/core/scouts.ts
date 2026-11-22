@@ -1,3 +1,4 @@
+import { type GivenLesson, lessonsSection } from "./lessons";
 import type { Decision, Ticket, Workflow } from "./types";
 
 /**
@@ -157,6 +158,7 @@ export function scoutSystemPrompt(opts: {
   /** Whether ask_librarian is offered. */
   librarian?: boolean;
   decisions: Decision[];
+  lessons?: GivenLesson[];
   trunkResults: string;
 }): string {
   const s = SCOUT_TYPES[opts.type]!;
@@ -193,7 +195,7 @@ Evidence: ${s.evidence}${
 
 Your shell is sandboxed. It can't create or connect to Unix sockets (EPERM), so tools that use socket IPC fail there (e.g. run TypeScript with \`node --import tsx\` rather than \`tsx\`); that is your shell, not a bug in the repo. Reaching a new network host asks the operator. The real checks run in a different sandbox that allows Unix sockets but has no network.`
       : ""
-  }${decisionsSection(opts.decisions)}
+  }${decisionsSection(opts.decisions)}${lessonsSection(opts.lessons ?? [])}
 
 Setup and checks on trunk, run by Acutis before you started in the same sandbox the real checks use (trust these over your own shell for "fails on trunk"):
 ${opts.trunkResults || "(none configured)"}

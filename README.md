@@ -90,6 +90,11 @@ answer go to the Decisions panel (`acutis decisions`), ranked by how much work w
 answer becomes a decision every later worker and scout follows. Workers that need work outside
 their ticket (`request_work`) file it as a proposed ticket for you to accept or reject.
 
+Lessons are short how-tos for a repo ("build the engine before the harness tests"). Workers and
+scouts propose them, and after each run a cheap model may draft one from the run's report. You
+approve, reword or reject them in the dashboard's Lessons panel or with `acutis lessons`; approved
+lessons go into every later worker's and scout's instructions.
+
 Notifications go to `notify-send` if it's installed (`ACUTIS_NOTIFY=off` to disable) and/or a
 webhook such as an ntfy.sh topic (`ACUTIS_NOTIFY_URL`). Permission requests and reviews are sent at
 once; questions and proposed tickets are batched into one notification per burst.
@@ -123,6 +128,9 @@ scouts:                # optional; every built-in scout is allowed by default, f
   auto_tickets: high   # high-confidence scout tickets go straight to todo (never = all wait in Proposed)
   budget_usd: 2
   tests: { focus: "the save/load path" }
+lessons:               # optional (on by default); false = off
+  draft: true          # after a run reaches review, a cheap model may propose one lesson from its report
+  budget_chars: 1500   # how much approved lesson text one prompt gets
 library:               # optional: which tracked docs workers can search (these are the defaults); false = off
   include: ["**/*.md", "**/*.mdx", "**/*.rst", "docs/**/*.txt"]
   exclude: ["**/node_modules/**", "**/vendor/**", ".acutis/**"]

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { isRunnerTicket } from "../core/scouts";
-import type { Decision, Noticed, Repo, Run, RunEvent, Ticket, PermissionRequest } from "../core/types";
+import type { Decision, Lesson, Noticed, Repo, Run, RunEvent, Ticket, PermissionRequest } from "../core/types";
 import { Markdown } from "./markdown";
 
 // ------------------------------------------------------------------- api
@@ -118,6 +118,8 @@ function App() {
   const [openDecisions, setOpenDecisions] = useState<RankedDecision[]>([]);
   const [decided, setDecided] = useState<Decision[]>([]);
   const [scoutTypes, setScoutTypes] = useState<ScoutTypeInfo[]>([]);
+  const [lessons, setLessons] = useState<Lesson[]>([]);
+  const loadLessons = useCallback(() => api<Lesson[]>("/api/lessons").then(setLessons).catch(() => {}), []);
   const loadDecisions = useCallback(
     () =>
       Promise.all([api<RankedDecision[]>("/api/decisions"), api<Decision[]>("/api/decisions?status=decided")])
@@ -137,8 +139,8 @@ function App() {
     setSandboxReason(s.sandboxReason);
     setPending(new Map((s.permissions ?? []).map((p: { runId: number; req: PermissionRequest }) => [p.req.id, p.runId])));
     setScoutTypes(s.scoutTypes ?? []);
-    await Promise.all([loadNoticed(), loadDecisions()]);
-  }, [loadNoticed, loadDecisions]);
+    await Promise.all([loadNoticed(), loadDecisions(), loadLessons()]);
+  }, [loadNoticed, loadDecisions, loadLessons]);
 
   useEffect(() => {
     if (!token) return; // nothing to ask with; the sign-in screen is already showing
@@ -169,6 +171,7 @@ function App() {
       const e = m.event;
       if (e.kind === "noticed") loadNoticed();
       if (e.kind.startsWith("scout.")) loadDecisions();
+      if (e.kind === "lesson.proposed") loadLessons();
       if (e.kind === "permission.request") setPending((p) => new Map(p).set((e.data as any).id, e.run_id));
       else if (e.kind === "permission.decision") {
         setPending((p) => {
@@ -268,6 +271,11 @@ function App() {
           decided={decided}
           onDecide={(id, body) => act(async () => (await api(`/api/decisions/${id}/decide`, "POST", body), await loadDecisions()))}
           onWithdraw={(id) => act(async () => (await api(`/api/decisions/${id}/withdraw`, "POST"), await loadDecisions()))}
+        />
+        <LessonsPanel
+          items={lessons}
+          onAct={(id, action, text) => act(async () => (await api(`/api/lessons/${id}/${action}`, "POST", text === undefined ? undefined : { text }), await loadLessons()))}
+          onOpenRun={(id) => setSelected(id)}
         />
         <ScoutsPanel
           repos={repos}
@@ -649,6 +657,90 @@ function ScoutsPanel({
 }
 
 /** Problems workers noticed outside their tickets: the operator makes a ticket or dismisses each. */
+function LessonsPanel({
+  items,
+  onAct,
+  onOpenRun,
+}: {
+  items: Lesson[];
+  onAct: (id: number, action: "approve" | "reject" | "retire" | "edit", text?: string) => void;
+  onOpenRun: (runId: number) => void;
+}) {
+  const proposed = items.filter((l) => l.status === "proposed");
+  const approved = items.filter((l) => l.status === "approved");
+  if (!proposed.length && !approved.length) return null;
+  return (
+    <details className="col lessons" open={proposed.length > 0}>
+      <summary>
+        <h2 title="Short how-tos for a repo. Approved lessons go into every worker's and scout's instructions.">Lessons · {proposed.length} proposed</h2>
+      </summary>
+      {proposed.map((l) => (
+        <LessonCard key={l.id} l={l} onAct={onAct} onOpenRun={onOpenRun} />
+      ))}
+      {approved.length > 0 && (
+        <details className="approved">
+          <summary className="muted">Approved · {approved.length}</summary>
+          {approved.map((l) => (
+            <div className="card lesson-done" key={l.id}>
+              <div>
+                L{l.id}: {l.text}
+              </div>
+              <div className="row">
+                <span className="muted">
+                  {l.repo} · given to {l.uses} run{l.uses === 1 ? "" : "s"}
+                </span>
+                <span style={{ flex: 1 }} />
+                <button className="btn sm" onClick={() => onAct(l.id, "retire")} title="Stop giving this lesson to new runs">
+                  Retire
+                </button>
+              </div>
+            </div>
+          ))}
+        </details>
+      )}
+    </details>
+  );
+}
+
+function LessonCard({ l, onAct, onOpenRun }: { l: Lesson; onAct: (id: number, action: "approve" | "reject", text?: string) => void; onOpenRun: (runId: number) => void }) {
+  const [text, setText] = useState(l.text);
+  const from = l.source === "draft" ? "drafted from a run's report" : l.source === "worker" ? "a worker" : l.source.startsWith("scout:") ? `the ${l.source.slice(6)} scout` : l.source;
+  return (
+    <div className="card lesson-item">
+      <div className="row">
+        <span className="muted">
+          L{l.id} · {l.repo} · from {from}
+          {l.run_id && (
+            <>
+              {" "}
+              (
+              <a href={`#run-${l.run_id}`} onClick={() => onOpenRun(l.run_id!)}>
+                run {l.run_id}
+              </a>
+              )
+            </>
+          )}
+        </span>
+      </div>
+      <textarea className="lesson-text" value={text} rows={3} maxLength={300} onChange={(e) => setText(e.target.value)} />
+      {l.evidence && (
+        <details>
+          <summary className="muted">Evidence (agent-written)</summary>
+          <div className="detail">{l.evidence}</div>
+        </details>
+      )}
+      <div className="row">
+        <button className="btn primary" onClick={() => onAct(l.id, "approve", text.trim() === l.text ? undefined : text)} title="Approved lessons go into later runs' instructions">
+          Approve
+        </button>
+        <button className="btn" onClick={() => onAct(l.id, "reject")}>
+          Reject
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function NoticedPanel({
   items,
   onTicket,
@@ -1107,6 +1199,21 @@ function EventRow({ e, results, root, runId }: { e: RunEvent; results: Map<strin
     case "contract.changed":
     case "contract.stale":
       return <div className="ev flag">⚠ {d.msg}</div>;
+    case "lessons.given":
+      return (
+        <div className="ev log">
+          given {(d.lessons ?? []).length} of {d.of} approved lesson{d.of === 1 ? "" : "s"}
+          {d.by === "all" ? "" : ` (chosen by ${d.by})`}
+          {(d.lessons ?? []).length > 0 && `: ${(d.lessons as { id: number }[]).map((l) => `L${l.id}`).join(", ")}`}
+        </div>
+      );
+    case "lesson.proposed":
+      return (
+        <div className="ev log">
+          proposed lesson L{d.id}
+          {d.source === "draft" ? " (drafted from the report)" : ""}: {d.text}
+        </div>
+      );
     case "work.request":
       return (
         <div className="ev flag">

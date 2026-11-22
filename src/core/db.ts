@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Decision, LibraryGap, Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
+import type { Decision, Lesson, LibraryGap, Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS repos (
@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS library_gaps (
   ticket_id INTEGER,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE IF NOT EXISTS lessons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  text TEXT NOT NULL,
+  text_key TEXT NOT NULL,
+  evidence TEXT NOT NULL DEFAULT '',
+  tags TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'proposed',
+  source TEXT NOT NULL,
+  run_id INTEGER,
+  uses INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, id);
 CREATE INDEX IF NOT EXISTS runs_ticket ON runs(ticket_id);
@@ -338,6 +353,53 @@ export class Store {
       .query<{ data: string }, [number, string]>("SELECT data FROM events WHERE run_id = ? AND kind = ? ORDER BY id DESC LIMIT 1")
       .get(runId, kind);
     return row ? JSON.parse(row.data) : null;
+  }
+
+  // ---- lessons
+  addLesson(l: { repo: string; text: string; text_key: string; evidence?: string; tags?: string; status: Lesson["status"]; source: string; run_id?: number | null }): Lesson {
+    const row = this.db
+      .query<{ id: number }, any>(
+        `INSERT INTO lessons (repo, text, text_key, evidence, tags, status, source, run_id, decided_at)
+         VALUES ($repo, $text, $text_key, $evidence, $tags, $status, $source, $run_id, $decided_at) RETURNING id`,
+      )
+      .get({
+        repo: l.repo,
+        text: l.text,
+        text_key: l.text_key,
+        evidence: l.evidence ?? "",
+        tags: l.tags ?? "",
+        status: l.status,
+        source: l.source,
+        run_id: l.run_id ?? null,
+        decided_at: l.status === "proposed" ? null : new Date().toISOString(),
+      })!;
+    return this.getLesson(row.id)!;
+  }
+  getLesson(id: number): Lesson | null {
+    return this.db.query<Lesson, [number]>("SELECT * FROM lessons WHERE id = ?").get(id);
+  }
+  findLessonByKey(repo: string, key: string): Lesson | null {
+    return this.db.query<Lesson, [string, string]>("SELECT * FROM lessons WHERE repo = ? AND text_key = ? ORDER BY id DESC LIMIT 1").get(repo, key);
+  }
+  listLessons(filter: { repo?: string; status?: Lesson["status"] } = {}): Lesson[] {
+    return this.db
+      .query<Lesson, [string | null, string | null]>(
+        "SELECT * FROM lessons WHERE (?1 IS NULL OR repo = ?1) AND (?2 IS NULL OR status = ?2) ORDER BY id DESC",
+      )
+      .all(filter.repo ?? null, filter.status ?? null);
+  }
+  updateLesson(id: number, patch: { status?: Lesson["status"]; text?: string; text_key?: string }): Lesson {
+    const cur = this.getLesson(id)!;
+    const status = patch.status ?? cur.status;
+    this.db
+      .query(
+        "UPDATE lessons SET status = ?, text = ?, text_key = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), decided_at = CASE WHEN ? != status THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE decided_at END WHERE id = ?",
+      )
+      .run(status, patch.text ?? cur.text, patch.text_key ?? cur.text_key, status, id);
+    return this.getLesson(id)!;
+  }
+  countLessonUse(ids: number[]) {
+    for (const id of ids) this.db.query("UPDATE lessons SET uses = uses + 1 WHERE id = ?").run(id);
   }
 
   // ---- events

@@ -361,6 +361,12 @@ export interface Workflow {
    * `check` an optional command run as an extra check when a run touches either.
    */
   contracts: Record<string, Contract>;
+  /**
+   * Lessons: short operator-approved how-tos for this repo, put in worker and scout prompts.
+   * `draft`: after a run reaches review, a cheap model may propose one from its report.
+   * `budget_chars`: how much lesson text one prompt gets. false turns lessons off for the repo.
+   */
+  lessons: { draft: boolean; budget_chars: number } | false;
   /** Scouts the repo allows, with a focus and budget each; false turns scouts off. */
   scouts:
     | {
@@ -424,6 +430,29 @@ export interface Contract {
 
 export type NoticedKind = "bug" | "failing-check" | "tech-debt" | "docs" | "security" | "idea" | "other";
 export const NOTICED_KINDS: NoticedKind[] = ["bug", "failing-check", "tech-debt", "docs", "security", "idea", "other"];
+
+/**
+ * A lesson: a short, repo-level how-to ("the harness needs the engine built first"). Agents and the
+ * report-drafting model propose them; only approved ones (or operator-written ones) reach a prompt.
+ */
+export interface Lesson {
+  id: number;
+  repo: string;
+  text: string;
+  /** Normalised text, for dedupe across every status. */
+  text_key: string;
+  evidence: string;
+  tags: string;
+  status: "proposed" | "approved" | "rejected" | "retired";
+  /** "worker", "scout:<type>", "draft" (from a run's report) or "operator". */
+  source: string;
+  run_id: number | null;
+  /** How many runs were given it. */
+  uses: number;
+  created_at: string;
+  updated_at: string;
+  decided_at: string | null;
+}
 
 /** Something a worker noticed outside its ticket. Reports with the same title in a repo are merged. */
 export interface Noticed {
