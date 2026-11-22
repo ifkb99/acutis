@@ -713,6 +713,7 @@ export class RunManager {
           autoTickets: settings?.auto_tickets ?? "never",
           sandboxed: Boolean(this.deps.agentSandboxed),
           library: Boolean(a.workflow.library),
+          librarian: Boolean(a.workflow.library && a.workflow.library.librarian && this.deps.oneShot),
           decisions,
           trunkResults: a.trunkResults ?? "(not re-run after a restart; run the checks yourself if you need them)",
         })

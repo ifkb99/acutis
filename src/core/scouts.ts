@@ -153,6 +153,8 @@ export function scoutSystemPrompt(opts: {
   autoTickets: "high" | "never";
   sandboxed: boolean;
   library: boolean;
+  /** Whether ask_librarian is offered. */
+  librarian?: boolean;
   decisions: Decision[];
   trunkResults: string;
 }): string {
@@ -175,7 +177,13 @@ What you can file (each is recorded the moment you call it):
 Limits for this run: ${MAX_SCOUT_TICKETS} tickets, ${MAX_SCOUT_DECISIONS} questions, about $${opts.budget.toFixed(2)} of spend.
 
 Before filing, check the existing work in your first message and with \`mcp__acutis__list_work\`. Don't file duplicates. Tickets the operator rejected were rejected on purpose. Follow the operator's decisions below.${
-    opts.library ? "\nUse `mcp__acutis__search_project` to find what the repo's docs already say." : ""
+    opts.library
+      ? `\nUse \`mcp__acutis__search_project\` to find what the repo's docs already say.${
+          opts.librarian
+            ? " For a broad question about how the project works, `mcp__acutis__ask_librarian` has a cheaper model read the docs and answer with citations, which keeps that reading out of your context."
+            : ""
+        }`
+      : ""
   }
 
 Evidence: ${s.evidence}${
