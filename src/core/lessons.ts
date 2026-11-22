@@ -72,7 +72,7 @@ export function parsePick(text: string, candidateIds: number[]): number[] {
 
 export const DRAFT_SYSTEM = `You read the final report of a coding agent's run on a repository, and decide whether it holds one lesson that would save a *future* agent working on a *different* ticket in the same repo real time.
 
-A lesson is a repo-level fact: how to build or test something, an order things must happen in, an environment quirk, a workaround the checks needed, a convention the checks enforce. It is NOT about this ticket's own feature or code, and NOT generic advice ("write tests", "read the code first").
+A lesson is a repo-level fact: how to build or test something, an order things must happen in, an environment quirk, a workaround the checks needed, a convention the checks enforce. It is NOT about this ticket's own feature or code, NOT generic advice ("write tests", "read the code first"), and NOT a restatement of the repo's checks ("run the tests, clippy and fmt before finishing"): agents are already given the checks.
 
 Most reports hold no lesson. If there is none, reply exactly: NONE
 
