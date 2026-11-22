@@ -31,7 +31,9 @@ describe("redaction", () => {
     ];
     for (const p of planted) expect(redactSecrets(`found ${p} in config.ts:3`)).not.toContain(p.slice(8, 20));
     expect(redactSecrets('API_KEY="9f8e7d6c5b4a3210" and password: hunter2hunter2')).toBe('API_KEY="[redacted]" and password: [redacted]');
-    const fine = "pk_user_id, skip-to-content-link-in-header, task-force-ids, src/sk-render-pipeline.ts:40, token: string;";
+    const fine =
+      'pk_user_id, skip-to-content-link-in-header, task-force-ids, src/sk-render-pipeline.ts:40, token: string; ' +
+      'password = request.form[field]; auth_token: authToken, const secretKey = process.env.SECRET_KEY; password: input.value';
     expect(redactSecrets(fine)).toBe(fine);
   });
 });
@@ -47,6 +49,8 @@ describe("the phase 3 scouts", () => {
   test("what a security scout files is redacted, in the ticket and in the run's event log", async () => {
     const key = "AKIAIOSFODNN7EXAMPLE";
     const script: FakeScript = async (c) => {
+      // The tool call as the runner reports it (the real SDK emits this before running the handler).
+      c.emit({ kind: "agent.tool_use", id: "t1", name: "mcp__acutis__propose_ticket", input: { title: "Remove the committed AWS key", body: `config/prod.env:4 holds ${key}` } });
       await tool(c, "propose_ticket").handler({ title: "Remove the committed AWS key", body: `config/prod.env:4 holds ${key}`, evidence: `grep shows ${key}`, confidence: "high" });
       finalReport(c);
       await c.nextMessage();
@@ -57,6 +61,9 @@ describe("the phase 3 scouts", () => {
     const t = app.tickets.list({ repo: "demo" }).find((x) => x.title === "Remove the committed AWS key")!;
     expect(t.body).not.toContain(key);
     expect(t.body).toContain("[redacted AWS key]");
+    const logged = app.store.events(run.id).find((e) => e.kind === "agent.tool_use")!;
+    expect(JSON.stringify(logged.data)).not.toContain(key);
+    expect((logged.data as any).input.body).toContain("[redacted AWS key]");
   });
 
   test("the UI/UX scout needs a preview; with one it gets the preview and browser tools", async () => {

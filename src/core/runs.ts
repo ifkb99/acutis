@@ -91,6 +91,7 @@ interface Active {
   /** Noticed reports and library gaps filed by this run's worker (capped per run). */
   noticedCount: number;
   gapCount: number;
+  librarianCount: number;
   /** Scout runs: setup and check results on trunk, what it filed, and whether its budget stopped it. */
   trunkResults?: string;
   scoutTickets: number;
@@ -144,6 +145,8 @@ function redactInput(input: unknown): unknown {
 }
 const MAX_NOTICED_PER_RUN = 10;
 const MAX_GAPS_PER_RUN = 5;
+const MAX_LIBRARIAN_PER_RUN = 8;
+const LIBRARIAN_TIMEOUT_MS = 120_000;
 
 /**
  * The entries one [SRC: …] marker cites: "a.md:3", "a.md:3, :9" (same file), "a.md:3; b.md:7",
@@ -217,8 +220,8 @@ export class RunManager {
     this.browser = deps.browser ?? unavailableBrowser;
     this.previews = new PreviewManager(deps.commandSandbox);
     this.library = new Library(deps.store.db);
-    // Decisions are written to the library only when they change; reseed them (the library may have been rebuilt).
-    for (const r of deps.store.listRepos()) this.refreshDecisionsLibrary(r.name);
+    // Decisions are written to the library only when they change: put them back after a rebuild.
+    if (this.library.rebuilt) for (const r of deps.store.listRepos()) this.refreshDecisionsLibrary(r.name);
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -378,6 +381,7 @@ export class RunManager {
       lastCostPoll: 0,
       noticedCount: 0,
       gapCount: 0,
+      librarianCount: 0,
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -464,7 +468,13 @@ export class RunManager {
    */
   private async describeCommit(repo: string, commit: string, budget: number) {
     const model = this.deps.libraryModel ?? "claude-haiku-5-5";
-    const tally = { status: "running", cost_usd: 0, described: 0, cached: 0, thin: 0, note: "" };
+    // The budget covers the commit across passes: an interrupted job resumes with what it already spent.
+    const prev = this.library.describeJob(repo, commit);
+    const tally = { status: "running", cost_usd: prev?.cost_usd ?? 0, described: prev?.described ?? 0, cached: prev?.cached ?? 0, thin: 0, note: "" };
+    if (tally.cost_usd >= budget) {
+      this.library.setDescribeJob(repo, commit, { ...tally, status: "partial", note: `stopped at the budget ($${budget.toFixed(2)})` });
+      return;
+    }
     this.library.setDescribeJob(repo, commit, tally);
     const MAX_BATCH_CHARS = 60_000;
     for (const f of this.library.filesToDescribe(repo, commit)) {
@@ -661,6 +671,7 @@ export class RunManager {
       lastCostPoll: 0,
       noticedCount: 0,
       gapCount: 0,
+      librarianCount: 0,
       scoutTickets: 0,
       scoutDecisions: 0,
       budgetStop: false,
@@ -1168,32 +1179,65 @@ export class RunManager {
         const x = a();
         const question = clip(args.question, 500);
         if (!question) return { text: "question is empty", isError: true };
-        // What the librarian was shown, from its tool outputs' "[L12] path:line [tier…]" lines.
-        const shown = new Set<string>();
-        const record = (t: string) => {
-          for (const m of t.matchAll(/^\[L\d+\] (.+?)(?::\d+)? \[(?:approved|reviewed)/gm)) shown.add(m[1]!);
-        };
+        if (x.librarianCount >= MAX_LIBRARIAN_PER_RUN) {
+          return { text: `This run already asked the librarian ${MAX_LIBRARIAN_PER_RUN} times; search the docs directly with search_project.`, isError: true };
+        }
+        x.librarianCount++;
+        // What the librarian opened (entry ranges) and what it only saw in search results.
+        const opened: { ref: string; from: number; to: number }[] = [];
+        const seen = new Set<string>();
         const tools = this.libraryTools(runId, a, "librarian").map((t) => ({
           ...t,
           handler: async (args2: Record<string, string | number | undefined>) => {
             const out = await t.handler(args2);
-            record(out.text);
+            for (const m of out.text.matchAll(/^\[L\d+\] (.+?)(?::(\d+))? \[(?:approved|reviewed)/gm)) {
+              const line = Number(m[2] ?? 0);
+              if (t.name === "read_project_entry") {
+                const bodyLines = out.text.split("\n").length - 2;
+                opened.push({ ref: m[1]!, from: line, to: line + Math.max(1, bodyLines) });
+              } else seen.add(m[2] ? `${m[1]}:${m[2]}` : m[1]!);
+            }
             return out;
           },
         }));
-        const r = await this.deps.oneShot!.ask({ system: LIBRARIAN_SYSTEM(x.repo.name), prompt: question, tools, maxTurns: 10, maxBudgetUsd: 0.15, model: this.deps.libraryModel });
+        const timeout = new Promise<{ text: string; costUsd: number; error: string }>((r) =>
+          setTimeout(() => r({ text: "", costUsd: 0, error: `no answer within ${LIBRARIAN_TIMEOUT_MS / 1000}s` }), LIBRARIAN_TIMEOUT_MS),
+        );
+        const r = await Promise.race([
+          this.deps.oneShot!.ask({ system: LIBRARIAN_SYSTEM(x.repo.name), prompt: question, tools, maxTurns: 10, maxBudgetUsd: 0.15, model: this.deps.libraryModel }),
+          timeout,
+        ]);
         this.addRunCost(runId, r.costUsd);
         if (r.error && !r.text) {
           this.deps.hub.emit(runId, "library.librarian", { question, error: r.error, cost_usd: r.costUsd });
           return { text: `The librarian couldn't answer (${r.error}). Search the docs yourself with search_project.`, isError: true };
         }
+        // A citation is checked against what the librarian actually opened: the path, and a line inside
+        // that entry. One that only matches a search result line is weaker, and anything else unsourced.
         const cited = [...r.text.matchAll(/\[SRC:\s*([^\]]+?)\]/g)].flatMap((m) => citationRefs(m[1]!));
-        const unverified = cited.filter((c) => !shown.has(c.replace(/:\d+(?:-\d+)?$/, "")));
+        const verdict = (c: string) => {
+          const m = /^(.+?)(?::(\d+)(?:-\d+)?)?$/.exec(c)!;
+          const ref = m[1]!;
+          const line = m[2] ? Number(m[2]) : null;
+          if (opened.some((o) => o.ref === ref && (line === null || o.from === 0 || (line >= o.from && line < o.to)))) return "opened";
+          return seen.has(c) || seen.has(ref) ? "seen" : "unsourced";
+        };
+        const seenOnly = cited.filter((c) => verdict(c) === "seen");
+        const unverified = cited.filter((c) => verdict(c) === "unsourced");
         const answer = clip(r.text, 4000);
-        const note = unverified.length
-          ? `\n\n(Acutis: ${unverified.length} [SRC] citation(s) point at entries the librarian didn't open: ${[...new Set(unverified)].slice(0, 5).join("; ")}. Treat those claims as unsourced.)`
-          : "";
-        this.deps.hub.emit(runId, "library.librarian", { question, chars: answer.length + note.length, cost_usd: r.costUsd, cited: cited.length, unverified: unverified.length });
+        const notes = [
+          seenOnly.length ? `${seenOnly.length} cite(s) only a search excerpt, not an entry it opened (${[...new Set(seenOnly)].slice(0, 5).join("; ")})` : "",
+          unverified.length ? `${unverified.length} point(s) at text it never opened (${[...new Set(unverified)].slice(0, 5).join("; ")}); treat those claims as unsourced` : "",
+        ].filter(Boolean);
+        const note = notes.length ? `\n\n(Acutis on the [SRC] citations: ${notes.join("; ")}.)` : "";
+        this.deps.hub.emit(runId, "library.librarian", {
+          question,
+          chars: answer.length + note.length,
+          cost_usd: r.costUsd,
+          cited: cited.length,
+          seen_only: seenOnly.length,
+          unverified: unverified.length,
+        });
         return { text: `${answer}${note}` };
       },
     };

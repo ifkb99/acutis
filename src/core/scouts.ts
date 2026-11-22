@@ -107,7 +107,10 @@ export function redactSecrets(text: string): string {
     .replace(/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}\b|\bgithub_pat_[A-Za-z0-9_]{40,}\b/g, "[redacted GitHub token]")
     .replace(/\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, "[redacted Slack token]")
     .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[redacted JWT]")
-    .replace(/\b((?:api|secret|access|auth|private)[_-]?(?:key|token|secret)|password|passwd)(\s*[:=]\s*)(["']?)[^\s"']{8,}\3/gi, "$1$2$3[redacted]$3");
+    // key = value only when the value looks like a literal: a quoted string, or a bare token with a digit
+    // (so `password = request.form["password"]` and `auth_token: authToken,` in code are left alone).
+    .replace(/\b((?:api|secret|access|auth|private)[_-]?(?:key|token|secret)|password|passwd)(\s*[:=]\s*)(["'])([^"'\s]{8,})\3/gi, "$1$2$3[redacted]$3")
+    .replace(/\b((?:api|secret|access|auth|private)[_-]?(?:key|token|secret)|password|passwd)(\s*[:=]\s*)(?=[A-Za-z0-9+/_-]*\d)([A-Za-z0-9+/_-]{8,})(?![\w.(\[])/gi, "$1$2[redacted]");
 }
 
 export const runnerSource = (type: string) => `scout-run:${type}`;

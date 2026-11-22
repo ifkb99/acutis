@@ -98,7 +98,61 @@ describe("descriptions (for finding, not reading)", () => {
     expect(describer.calls.at(-1)).toContain("File: docs/b.md");
   });
 
-  test("describing stops at its budget and when the daemon shuts down", async () => {
+  test("a citation that only matches a search excerpt is marked as weaker than one the librarian opened", async () => {
+    const librarian: OneShotModel = {
+      async ask(opts) {
+        await opts.tools!.find((t) => t.name === "search_project")!.handler({ query: "cache cap" });
+        return { text: "LRU capped at 512 [SRC: docs/cache.md:1].", costUsd: 0.001 };
+      },
+    };
+    let answer = "";
+    const script: FakeScript = async (c) => {
+      answer = await call(c, "ask_librarian", { question: "cache?" });
+      c.result();
+      await c.nextMessage();
+    };
+    const files = { "docs/cache.md": "# Cache\n\nThe cache is an LRU with a 512-entry cap.\n", ".acutis/workflow.md": "---\nlibrary:\n  librarian: true\n---\n" };
+    const { app } = await setup(librarian, [script], files);
+    const r = await app.runs.start(app.tickets.create({ repo: "demo", title: "q", body: "" }).id);
+    await until(app, r.id, "awaiting_review");
+    expect(answer).toContain("1 cite(s) only a search excerpt");
+  });
+
+  test("an interrupted describe job resumes with what it already spent, and stops on shutdown", async () => {
+    const describer = new FakeDescriber({}, 0.3);
+    const files: Record<string, string> = { ".acutis/workflow.md": "---\nlibrary:\n  describe: true\n  describe_budget_usd: 0.5\n---\n" };
+    for (const n of ["a", "b", "c", "d"]) files[`docs/${n}.md`] = `# ${n}\n\n${long(n)}\n`;
+    let open!: () => void;
+    describer.gate = new Promise<void>((r) => (open = r));
+    const quick: FakeScript = async (c) => {
+      c.result();
+      await c.nextMessage();
+    };
+    const { app, home } = await setup(describer, [quick], files);
+    const r = await app.runs.start(app.tickets.create({ repo: "demo", title: "a", body: "" }).id);
+    await until(app, r.id, "awaiting_review");
+    app.runs.shutdown(); // while the first call is in flight
+    open();
+    await app.runs.describeIdle();
+    const commit = app.store.getRun(r.id)!.base_commit!;
+    expect(app.runs.library.describeJob("demo", commit)).toMatchObject({ status: "partial", note: "stopped (daemon shutting down)" });
+    expect(describer.calls.length).toBe(1);
+
+    // After a restart the job resumes; it spent $0.30, so one more call reaches the $0.50 cap and it stops for good.
+    const app2 = createApp({ home, port: 0 }, { runner: new FakeRunner([quick, quick]), oneShot: describer });
+    const r2 = await app2.runs.start(app2.tickets.create({ repo: "demo", title: "b", body: "" }).id);
+    await until(app2, r2.id, "awaiting_review");
+    await app2.runs.describeIdle();
+    expect(describer.calls.length).toBe(2);
+    const r3 = await app2.runs.start(app2.tickets.create({ repo: "demo", title: "c", body: "" }).id);
+    await until(app2, r3.id, "awaiting_review");
+    await app2.runs.describeIdle();
+    expect(describer.calls.length).toBe(2); // the cap holds across passes
+    expect(app2.runs.library.describeJob("demo", commit)!.cost_usd).toBeCloseTo(0.6);
+    app2.runs.shutdown();
+  });
+
+  test("describing stops at its budget", async () => {
     const describer = new FakeDescriber({}, 0.3);
     const files: Record<string, string> = { ".acutis/workflow.md": "---\nlibrary:\n  describe: true\n  describe_budget_usd: 0.5\n---\n" };
     for (const n of ["a", "b", "c", "d"]) files[`docs/${n}.md`] = `# ${n}\n\n${long(n)}\n`;
@@ -200,7 +254,8 @@ describe("overview and librarian", () => {
     expect(workerTools).toContain("ask_librarian");
     expect(seenTools.sort()).toEqual(["project_overview", "read_project_entry", "search_project"]);
     expect(answer).toContain("[SRC: docs/cache.md:3]");
-    expect(answer).toContain("1 [SRC] citation(s) point at entries the librarian didn't open: docs/history.md:9");
+    expect(answer).toContain("1 point(s) at text it never opened (docs/history.md:9)");
+    expect(answer).not.toContain("docs/cache.md:3)"); // opened, and line 3 is inside that entry
     expect(app.store.getRun(r.id)!.cost_usd).toBeCloseTo(0.014);
     const ev = app.store.events(r.id);
     expect(ev.find((e) => e.kind === "library.search")!.data).toMatchObject({ by: "librarian" });

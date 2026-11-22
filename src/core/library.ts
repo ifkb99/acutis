@@ -152,12 +152,15 @@ export interface DescribeFile {
 }
 
 export class Library {
+  /** True when an older library was dropped at startup (decisions must be written back). */
+  readonly rebuilt: boolean = false;
   constructor(private db: Database) {
     // The library is a cache of trunk docs: if its shape is from an older Acutis (no `nav`
     // column), drop it and reindex on the next run start, rather than migrate an FTS table.
     const cols = db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('library')").all().map((c) => c.name);
     if (cols.length && !cols.includes("nav")) {
       db.exec("DROP TABLE library; DELETE FROM library_commits;");
+      this.rebuilt = true;
     }
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS library USING fts5(
