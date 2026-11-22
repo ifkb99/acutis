@@ -170,6 +170,21 @@ describe("descriptions (for finding, not reading)", () => {
     expect(job.note).toContain("budget");
   });
 
+  test("a rebuilt library forgets per-commit describe state, so describing runs again (from the cache)", () => {
+    const path = `${tempDir("acutis-db-")}/acutis.db`;
+    const old = new Database(path, { create: true });
+    old.exec(`CREATE VIRTUAL TABLE library USING fts5(heading, body, nav, repo UNINDEXED, commit_id UNINDEXED, kind UNINDEXED, ref UNINDEXED, line UNINDEXED);
+      CREATE TABLE library_commits (repo TEXT NOT NULL, commit_id TEXT NOT NULL, files INTEGER NOT NULL, chunks INTEGER NOT NULL, indexed_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (repo, commit_id));
+      CREATE TABLE library_describe_jobs (repo TEXT NOT NULL, commit_id TEXT NOT NULL, status TEXT NOT NULL, cost_usd REAL NOT NULL DEFAULT 0, described INTEGER NOT NULL DEFAULT 0, cached INTEGER NOT NULL DEFAULT 0, thin INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '', PRIMARY KEY (repo, commit_id));
+      CREATE TABLE library_descriptions (key TEXT PRIMARY KEY, text TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '');
+      INSERT INTO library_describe_jobs (repo, commit_id, status) VALUES ('demo', 'c1', 'done');
+      INSERT INTO library_descriptions (key, text) VALUES ('k1', 'kept');`);
+    old.close();
+    const app = createApp({ home: path.replace(/\/acutis\.db$/, ""), port: 0 }, { runner: new FakeRunner([]) });
+    expect(app.runs.library.describeJob("demo", "c1")).toBeNull();
+    expect(app.runs.library.cachedDescription("k1")).toBe("kept");
+  });
+
   test("a library from phase 1 (no description column) is rebuilt, and decisions are put back", () => {
     const path = `${tempDir("acutis-db-")}/acutis.db`;
     const old = new Database(path, { create: true });

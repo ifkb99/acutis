@@ -267,17 +267,26 @@ Ideas from reviewing anima-research's connectome-host and context-manager; see t
   empty cwd, one turn and a spend cap (probe: offered no tools, ignored an injected "write a file"). It runs in the background, one job at a
   time, capped per commit and stopped on shutdown; `acutis library <repo>` shows status and cost.
   **Probe on stahl** (38 docs): 44 calls, 660 sections described and 96 thin, $0.26, about 9 minutes
-  sequentially. On 10 natural-language questions, the right wiki page was in the top 3 for 6 with
-  descriptions against 2 without (top-1: 2 against 1); one query got worse (1st to 3rd).
+  sequentially. A later pass after a rebuild reused all 660 from the cache ($0.0003, 3s). Ranking on 10
+  questions I wrote, one run, top 1/3/5 for the right wiki page:
+
+  | Search | Top 1 | Top 3 | Top 5 |
+  |---|---|---|---|
+  | Original | 1 | 2 | 2 |
+  | Dropping stop words from queries, indexing file paths (now the default) | 1 | 4 | 5 |
+  | Plus descriptions | 3 | 6 | 7 |
+
+  A rebuilt library forgets per-commit describe state, so describing runs again from the cache.
 - **`project_overview`**: a table of contents of the docs, at no model cost.
 - **`ask_librarian`** (`library.librarian`, off by default). A short, synchronous Haiku session with
   only the search, read and overview tools answers one question, marking claims `[SRC: path:line]`,
   `[INF]`, `[GEN]` or ❓. Acutis flags `[SRC]` citations to entries the librarian never opened, and
   adds its cost to the run. It is an Acutis tool rather than a native SDK subagent, because subagents run in
-  the background in this Claude Code even with `background: false`, so a worker's turn could end
-  before the answer. **Open:** the same applies to the built-in `Agent` tool workers already have, so a
-  worker can finish its turn while a subagent is still working. Probe: one question, $0.004, a good answer
-  with honest gaps.
+  the background in this Claude Code even with `background: false` (two Haiku probes), so a worker's turn
+  could end before the answer. **Untested in Acutis:** workers also have the built-in `Agent` tool, so a
+  worker might end its turn while a subagent still works. No real run has used it yet (0 of the 12 trial
+  runs). Probe: one question, $0.002-0.004, a good answer with honest gaps. After the citation fix: 7 cited,
+  0 unsourced, 1 only seen in a search excerpt.
 
 ### Scouts and the decision register (2026-11-21, phase 2 of the scouts plan)
 

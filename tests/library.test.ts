@@ -47,7 +47,9 @@ describe("library units", () => {
   });
 
   test("queries become quoted words, so FTS operators in the input can't break or widen the search", () => {
-    expect(ftsQuery('auth* OR "x" NEAR(a b) -token')).toBe('"auth" OR "or" OR "near" OR "token"');
+    expect(ftsQuery('auth* OR "x" NEAR(a b) -token')).toBe('"auth" OR "near" OR "token"');
+    expect(ftsQuery("how do I add a unit")).toBe('"add" OR "unit"');
+    expect(ftsQuery("what is it")).toBe('"what" OR "is" OR "it"'); // only stop words: keep them
     expect(ftsQuery("!!")).toBeNull();
   });
 

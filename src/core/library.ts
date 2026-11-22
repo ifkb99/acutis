@@ -108,9 +108,17 @@ export function chunkText(text: string, markdown: boolean): Chunk[] {
   return chunks;
 }
 
-/** Words for an FTS5 query: quoted terms joined with OR (ranked by bm25), no operators from the input. */
+const STOP_WORDS = new Set(
+  "a an and are as at be by can could do does did for from has have how i in into is it its me my of on or should so that the their them there these this to was we what when where which who why will with would you your".split(" "),
+);
+
+/**
+ * Words for an FTS5 query: quoted terms joined with OR (ranked by bm25), no operators from the
+ * input, and no stop words (they match nearly every section). A query of only stop words keeps them.
+ */
 export function ftsQuery(text: string): string | null {
-  const words = [...new Set((text.toLowerCase().match(/[\p{L}\p{N}_]{2,}/gu) ?? []).slice(0, 12))];
+  const all = [...new Set(text.toLowerCase().match(/[\p{L}\p{N}_]{2,}/gu) ?? [])];
+  const words = (all.some((w) => !STOP_WORDS.has(w)) ? all.filter((w) => !STOP_WORDS.has(w)) : all).slice(0, 12);
   return words.length ? words.map((w) => `"${w}"`).join(" OR ") : null;
 }
 
@@ -158,13 +166,13 @@ export class Library {
     // The library is a cache of trunk docs: if its shape is from an older Acutis (no `nav`
     // column), drop it and reindex on the next run start, rather than migrate an FTS table.
     const cols = db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('library')").all().map((c) => c.name);
-    if (cols.length && !cols.includes("nav")) {
+    if (cols.length && (!cols.includes("nav") || !cols.includes("path"))) {
       db.exec("DROP TABLE library; DELETE FROM library_commits;");
       this.rebuilt = true;
     }
     db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS library USING fts5(
-        heading, body, nav, repo UNINDEXED, commit_id UNINDEXED, kind UNINDEXED, ref UNINDEXED, line UNINDEXED,
+        heading, body, nav, path, repo UNINDEXED, commit_id UNINDEXED, kind UNINDEXED, ref UNINDEXED, line UNINDEXED,
         tokenize = 'porter unicode61'
       );
       CREATE TABLE IF NOT EXISTS library_commits (
@@ -187,6 +195,9 @@ export class Library {
         PRIMARY KEY (repo, commit_id)
       );
     `);
+    // A rebuilt library has no descriptions yet: forget per-commit describe state so it runs again
+    // (cheaply: the descriptions themselves stay cached by content).
+    if (this.rebuilt) db.exec("DELETE FROM library_describe_jobs; DELETE FROM library_files;");
   }
 
   // ---- descriptions (for finding, never as the answer)
@@ -298,7 +309,7 @@ export class Library {
     const exclude = cfg.exclude.map((g) => new Bun.Glob(g));
     const docs = files.filter((f) => include.some((g) => g.match(f)) && !exclude.some((g) => g.match(f))).slice(0, MAX_FILES);
     const insert = this.db.query(
-      "INSERT INTO library (heading, body, nav, repo, commit_id, kind, ref, line) VALUES (?, ?, '', ?, ?, 'doc', ?, ?)",
+      "INSERT INTO library (heading, body, nav, path, repo, commit_id, kind, ref, line) VALUES (?, ?, '', ?, ?, ?, 'doc', ?, ?)",
     );
     let fileCount = 0;
     let chunkCount = 0;
@@ -309,7 +320,7 @@ export class Library {
         if (text === null) continue;
         fileCount++;
         for (const c of chunkText(text, /\.mdx?$/i.test(rel))) {
-          insert.run(c.heading, c.body, repo, commit, rel, c.line);
+          insert.run(c.heading, c.body, rel, repo, commit, rel, c.line);
           chunkCount++;
         }
       }
@@ -348,7 +359,7 @@ export class Library {
   /** Add summaries of newly landed runs. Existing ones stay, so ids from earlier searches still open. */
   addRunSummaries(repo: string, runs: RunSummary[]) {
     const insert = this.db.query(
-      "INSERT INTO library (heading, body, nav, repo, commit_id, kind, ref, line) VALUES (?, ?, '', ?, '', 'run', ?, 0)",
+      "INSERT INTO library (heading, body, nav, path, repo, commit_id, kind, ref, line) VALUES (?, ?, '', '', ?, '', 'run', ?, 0)",
     );
     this.db.transaction(() => {
       for (const r of runs) insert.run(r.title, r.body, repo, `run ${r.runId}`);
@@ -358,7 +369,7 @@ export class Library {
   /** Replace the repo's decisions (operator-written; few, and they change when superseded). */
   setDecisions(repo: string, decisions: { id: number; question: string; decision: string; asked_by: string }[]) {
     const insert = this.db.query(
-      "INSERT INTO library (heading, body, nav, repo, commit_id, kind, ref, line) VALUES (?, ?, '', ?, '', 'decision', ?, 0)",
+      "INSERT INTO library (heading, body, nav, path, repo, commit_id, kind, ref, line) VALUES (?, ?, '', '', ?, '', 'decision', ?, 0)",
     );
     this.db.transaction(() => {
       this.db.query("DELETE FROM library WHERE repo = ? AND kind = 'decision'").run(repo);
@@ -376,7 +387,7 @@ export class Library {
       .query<{ rowid: number; kind: LibraryHit["kind"]; ref: string; line: number; heading: string; snip: string; nav: string }, any[]>(
         `SELECT rowid, kind, ref, line, heading, nav, snippet(library, 1, '', '', '…', 32) AS snip
          FROM library WHERE library MATCH ? AND repo = ? AND (commit_id = ? OR kind IN ('run', 'decision'))
-         ORDER BY bm25(library, 4.0, 1.0, 2.0) * CASE kind WHEN 'run' THEN 0.8 ELSE 1.0 END LIMIT ?`,
+         ORDER BY bm25(library, 4.0, 1.0, 2.0, 3.0) * CASE kind WHEN 'run' THEN 0.8 ELSE 1.0 END LIMIT ?`,
       )
       .all(q, repo, commit ?? "", Math.max(1, Math.min(10, limit)))
       .map((r) => ({ id: `L${r.rowid}`, kind: r.kind, ref: r.ref, line: Number(r.line), heading: r.heading, snippet: r.snip, nav: r.nav ?? "" }));
