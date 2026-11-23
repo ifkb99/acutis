@@ -14,14 +14,14 @@ afterAll(() => {
   server.stop(true);
 });
 
-test.skipIf(!chrome)("the Lessons petal shows a proposed lesson with its evidence, and the sidebar's Approve approves it in one click (headless Chrome)", async () => {
+test.skipIf(!chrome)("the Lessons petal's drawer shows a proposed lesson with its evidence, and the sidebar's Approve approves it in one click (headless Chrome)", async () => {
   app.store.addRepo({ name: "l", path: await makeRepo({ "a.txt": "a\n" }), base: "main" });
   const text = "Build packages/engine before the harness tests: the harness imports engine/dist.";
   const l = app.store.addLesson({ repo: "l", text, text_key: lessonKey(text), evidence: "harness: cannot find module engine/dist", status: "proposed", source: "draft" });
   app.runs.addLesson("l", "Use pnpm for installs in this repo, never npm.");
   const r = await new ChromeBrowser(chrome).check({
     url: `http://127.0.0.1:${port}/#token=${app.token}`,
-    steps: "waitfor .lessons .lesson-item\nwaitfor .needs-lesson\nclick .needs-lesson .btn.primary\nwait 800",
+    steps: "waitfor .petal.tint-mint\nclick .petal.tint-mint\nwaitfor .lessons .lesson-item\nwaitfor .needs-lesson\nclick .needs-lesson .btn.primary\nwait 800",
     script: `JSON.stringify({ heading: document.querySelector('.lessons h2')?.textContent, approved: document.querySelector('.lessons .approved summary')?.textContent, items: document.querySelectorAll('.lesson-item, .needs-lesson').length })`,
     width: 1300,
     height: 900,
@@ -37,7 +37,7 @@ test.skipIf(!chrome)("a lesson to recheck shows what changed, and the sidebar's 
   app.store.setLessonWatch(l.id, { paths: "a.txt", seen_commit: "abc", stale: JSON.stringify({ paths: ["a.txt"], commit: "def" }) });
   const r = await new ChromeBrowser(chrome).check({
     url: `http://127.0.0.1:${port}/#token=${app.token}`,
-    steps: "waitfor .lessons .lesson-stale\nwaitfor .needs-lesson-stale\nclick .needs-lesson-stale .btn.primary\nwait 800",
+    steps: "waitfor .petal.tint-mint\nclick .petal.tint-mint\nwaitfor .lessons .lesson-stale\nwaitfor .needs-lesson-stale\nclick .needs-lesson-stale .btn.primary\nwait 800",
     script: `JSON.stringify({ heading: document.querySelector('.lessons h2')?.textContent, stale: document.querySelectorAll('.lesson-stale, .needs-lesson-stale').length })`,
     width: 1300,
     height: 900,
