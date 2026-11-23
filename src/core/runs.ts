@@ -3425,27 +3425,28 @@ ${this.workSnapshot(repo)}${gapList}`;
     const tip = (await workspaces.isBookmark(a.repo, epic.bookmark)) ? await workspaces.resolve(a.repo, epic.bookmark) : null;
     // The tip is already under the change (it started there, or on a trunk that holds it): moving
     // the bookmark is a fast-forward. Otherwise it moved on since the run started.
-    if (tip && tip !== a.ws.baseCommit && !(await workspaces.isAncestor(a.repo, tip, a.ws.baseCommit))) {
-      const { moved, conflicts } = await workspaces.rebase(a.repo, a.ws, tip);
-      if (moved) {
-        a.ws = { ...a.ws, baseCommit: tip };
-        a.epic = epic;
-        a.stackedOn = null;
-        hub.run(store.updateRun(runId, { base_commit: tip }));
-      }
-      if (conflicts.length) {
-        return back(
-          `rebasing onto epic ${epic.id}'s branch (${epic.bookmark} at ${tip.slice(0, 12)}) left conflicts in: ${conflicts.join(", ")}. Send it back to the agent to resolve them, then approve again.`,
-        );
-      }
-      if (moved) {
-        hub.emit(runId, "system.log", { msg: `Rebased onto epic ${epic.id}'s branch ${epic.bookmark} (${tip.slice(0, 12)}); re-running checks on the combined result` });
-        this.previews.stop(runId);
-        const failures = await this.runGates(runId, a, "landing");
-        if (failures === null) return back("run changed state during the re-check");
-        hub.run(store.updateRun(runId, { gates_ok: a.workflow.gates.length ? (failures.length ? 0 : 1) : null }));
-        if (failures.length) return back(`checks fail after rebasing onto epic ${epic.id}'s branch. Send it back to the agent with the failures, then approve again.`);
-      }
+    const onto = tip && tip !== a.ws.baseCommit && !(await workspaces.isAncestor(a.repo, tip, a.ws.baseCommit)) ? tip : a.ws.baseCommit;
+    // Always asked, even when nothing moves: a change an earlier, stopped landing rebased already
+    // sits on the tip but may still be conflicted.
+    const { moved, conflicts } = await workspaces.rebase(a.repo, a.ws, onto);
+    if (moved) {
+      a.ws = { ...a.ws, baseCommit: onto };
+      a.epic = epic;
+      a.stackedOn = null;
+      hub.run(store.updateRun(runId, { base_commit: onto }));
+    }
+    if (conflicts.length) {
+      return back(
+        `rebasing onto epic ${epic.id}'s branch (${epic.bookmark} at ${onto.slice(0, 12)}) left conflicts in: ${conflicts.join(", ")}. Send it back to the agent to resolve them, then approve again.`,
+      );
+    }
+    if (moved) {
+      hub.emit(runId, "system.log", { msg: `Rebased onto epic ${epic.id}'s branch ${epic.bookmark} (${onto.slice(0, 12)}); re-running checks on the combined result` });
+      this.previews.stop(runId);
+      const failures = await this.runGates(runId, a, "landing");
+      if (failures === null) return back("run changed state during the re-check");
+      hub.run(store.updateRun(runId, { gates_ok: a.workflow.gates.length ? (failures.length ? 0 : 1) : null }));
+      if (failures.length) return back(`checks fail after rebasing onto epic ${epic.id}'s branch. Send it back to the agent with the failures, then approve again.`);
     }
     await workspaces.advance(a.repo, a.ws, epic.bookmark, { push: a.workflow.land === "push" });
     hub.emit(runId, "system.log", { msg: `Epic ${epic.id}'s branch ${epic.bookmark} now includes this change.` });

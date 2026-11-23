@@ -130,6 +130,25 @@ describe("epics", () => {
     await expect(app.runs.approve(two.run.id)).rejects.toThrow(/rebasing onto epic \d+'s branch .* left conflicts in: shared\.txt/);
     expect(state(app, two.run.id)).toBe("awaiting_review");
     expect(await rev(repoPath, epic.bookmark)).toBe(tip1);
+    // Approving again without resolving it: the change already sits on the tip, still conflicted.
+    await expect(app.runs.approve(two.run.id)).rejects.toThrow(/left conflicts in: shared\.txt/);
+    expect(await rev(repoPath, epic.bookmark)).toBe(tip1);
+    app.runs.shutdown();
+  });
+
+  test("checks that fail only on the combination stop the landing and leave the branch where it was", async () => {
+    // Each ticket alone passes; both files together fail.
+    const { app, repoPath } = await setup([writes({ "a.txt": "A\n" }), writes({ "b.txt": "B\n" })], wf("test ! -f a.txt -o ! -f b.txt"));
+    const epic = app.runs.createEpic("demo", "Combined");
+    const one = await startTicket(app, "One", epic.id);
+    const two = await startTicket(app, "Two", epic.id);
+    expect(two.run.gates_ok).toBe(1);
+    await app.runs.approve(one.run.id);
+    const tip1 = await rev(repoPath, epic.bookmark);
+    await expect(app.runs.approve(two.run.id)).rejects.toThrow(/checks fail after rebasing onto epic/);
+    expect(state(app, two.run.id)).toBe("awaiting_review");
+    expect(app.store.getRun(two.run.id)!.gates_ok).toBe(0);
+    expect(await rev(repoPath, epic.bookmark)).toBe(tip1);
     app.runs.shutdown();
   });
 
