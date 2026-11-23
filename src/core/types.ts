@@ -27,6 +27,13 @@ export interface Ticket {
   decision_id: number | null;
   /** The noticed report a scout turned into this ticket (marked ticketed once the ticket is accepted). */
   noticed_id: number | null;
+  /**
+   * The ticket this one builds on. Its run starts from that ticket's landed work, even before that
+   * work is merged into trunk (land: bookmark or push), so a follow-up sees what came before it.
+   */
+  builds_on: number | null;
+  /** The run that filed this ticket: a scout's propose_ticket, a worker's request_work or contract request, or a writer's saved draft. Null for operator tickets. */
+  origin_run_id: number | null;
   external_id: string | null;
   created_at: string;
   updated_at: string;
@@ -62,7 +69,14 @@ export interface Run {
   state: RunState;
   workspace_name: string | null;
   workspace_path: string | null;
+  /** Where the workspace started: trunk, or the landed work of the ticket this one builds on. */
   base_commit: string | null;
+  /**
+   * Trunk when the run started. Policy (.acutis/workflow.md) and contract changes are judged from
+   * it, never from base_commit, which can be worker-written work not yet on trunk. Null on runs
+   * from before it was recorded: base_commit was trunk then.
+   */
+  trunk_commit: string | null;
   session_id: string | null;
   model: string | null;
   attempt: number;
@@ -75,6 +89,8 @@ export interface Run {
   session_cost: number | null;
   error: string | null;
   bookmark: string | null;
+  /** The commit that landed (what was approved), so tickets building on this one start from it even if the bookmark goes away. */
+  landed_commit: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -102,7 +118,11 @@ export interface TicketSource {
     confidence?: Ticket["confidence"];
     decision_id?: number | null;
     noticed_id?: number | null;
+    builds_on?: number | null;
+    origin_run_id?: number | null;
   }): Ticket;
+  /** Set or clear the ticket this one builds on (validated by the caller). */
+  setBuildsOn(id: number, buildsOn: number | null): Ticket;
   /** Transactional claim: returns false if the ticket is not claimable. */
   claim(id: number): boolean;
   setStatus(id: number, status: TicketStatus): Ticket;
@@ -143,6 +163,8 @@ export interface WorkspaceProvider {
   advance(repo: Repo, ws: Workspace, bookmark: string): Promise<void>;
   /** True if `name` is a local bookmark in the repo. */
   isBookmark(repo: Repo, name: string): Promise<boolean>;
+  /** True if `ancestor` is `descendant` or one of its ancestors. */
+  isAncestor(repo: Repo, ancestor: string, descendant: string): Promise<boolean>;
   /** Pick up trunk moves made outside the provider (e.g. a git pull in a colocated repo). Never fetches. */
   refresh?(repo: Repo): Promise<void>;
   /** Forget the workspace and delete its directory. Keeps the change unless abandon=true. */
@@ -200,8 +222,8 @@ export interface ToolOutput {
 export interface AcutisTool {
   name: string;
   description: string;
-  params: Record<string, { type: "string" | "number"; description: string; optional?: boolean }>;
-  handler: (args: Record<string, string | number | undefined>) => Promise<ToolOutput>;
+  params: Record<string, { type: "string" | "number" | "boolean"; description: string; optional?: boolean }>;
+  handler: (args: Record<string, string | number | boolean | undefined>) => Promise<ToolOutput>;
 }
 
 export interface AgentSpec {

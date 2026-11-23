@@ -140,9 +140,13 @@ export class Store {
     if (!has("tickets", "confidence")) this.db.exec("ALTER TABLE tickets ADD COLUMN confidence TEXT");
     if (!has("tickets", "decision_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN decision_id INTEGER");
     if (!has("tickets", "noticed_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN noticed_id INTEGER");
+    if (!has("tickets", "origin_run_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN origin_run_id INTEGER");
     if (!has("runs", "woken_by")) this.db.exec("ALTER TABLE runs ADD COLUMN woken_by TEXT");
     if (!has("lessons", "paths")) this.db.exec("ALTER TABLE lessons ADD COLUMN paths TEXT");
     if (!has("lessons", "seen_commit")) this.db.exec("ALTER TABLE lessons ADD COLUMN seen_commit TEXT");
+    if (!has("tickets", "builds_on")) this.db.exec("ALTER TABLE tickets ADD COLUMN builds_on INTEGER");
+    if (!has("runs", "trunk_commit")) this.db.exec("ALTER TABLE runs ADD COLUMN trunk_commit TEXT");
+    if (!has("runs", "landed_commit")) this.db.exec("ALTER TABLE runs ADD COLUMN landed_commit TEXT");
     if (!has("lessons", "stale")) this.db.exec("ALTER TABLE lessons ADD COLUMN stale TEXT");
   }
 

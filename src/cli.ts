@@ -20,7 +20,9 @@ Repos and tickets
   acutis repo add <path> [--name N] [--base REV] [--init-jj]
   acutis repo ls
   acutis repo notes <repo> [--set TEXT | --file PATH]   Show or set operator notes for workers
-  acutis ticket add <repo> <title> [--body TEXT | --body-file PATH]
+  acutis ticket add <repo> <title> [--body TEXT | --body-file PATH] [--builds-on N]
+                                               --builds-on: start from ticket #N's landed work, even before it's merged
+  acutis ticket builds-on <ticket-id> <N|none> Set or clear the ticket a not-yet-started ticket builds on
   acutis ticket ls
   acutis ticket cancel <ticket-id>
   acutis proposed                              Tickets scouts filed that wait for you
@@ -47,7 +49,8 @@ Ticket drafts (an agent reads the repo and writes a ticket from your request, as
   acutis draft answer <run> [--a N=TEXT]... [--decide N]... [--note TEXT]
                                                Answer questions (--decide: also keep the answer as a repo decision)
                                                and/or ask for a revision; the writer continues
-  acutis draft save <run> [--start]            Save the latest draft as a todo ticket (--start: and start it)
+  acutis draft save <run> [--start] [--builds-on N]
+                                               Save the latest draft as a todo ticket (--start: and start it)
   acutis draft discard <run>
 
 Lessons (short how-tos approved lessons put in every worker's and scout's prompt)
@@ -480,18 +483,26 @@ switch (cmd) {
       const { values, positionals } = parseArgs({
         args: rest,
         allowPositionals: true,
-        options: { body: { type: "string" }, "body-file": { type: "string" } },
+        options: { body: { type: "string" }, "body-file": { type: "string" }, "builds-on": { type: "string" } },
       });
       const [repo, ...title] = positionals;
-      if (!repo || !title.length) die("usage: acutis ticket add <repo> <title> [--body TEXT | --body-file PATH]");
+      if (!repo || !title.length) die("usage: acutis ticket add <repo> <title> [--body TEXT | --body-file PATH] [--builds-on N]");
       const body = values["body-file"] ? await Bun.file(values["body-file"]).text() : values.body ?? "";
-      const t = await post("/api/tickets", { repo, title: title.join(" "), body });
-      console.log(`#${t.id} ${t.title}`);
+      const builds_on = values["builds-on"] ? runArg(values["builds-on"].replace(/^#/, ""), "--builds-on takes a ticket id") : null;
+      const t = await post("/api/tickets", { repo, title: title.join(" "), body, builds_on });
+      console.log(`#${t.id} ${t.title}${t.builds_on ? ` (builds on #${t.builds_on})` : ""}`);
+    } else if (sub === "builds-on") {
+      const usage = "acutis ticket builds-on <ticket-id> <N|none>";
+      const id = runArg(rest[0], usage);
+      if (!rest[1]) die(`usage: ${usage}`);
+      const builds_on = rest[1] === "none" ? null : runArg(rest[1].replace(/^#/, ""), usage);
+      const t = await post(`/api/tickets/${id}/builds-on`, { builds_on });
+      console.log(t.builds_on ? `#${t.id} builds on #${t.builds_on}` : `#${t.id} starts from trunk`);
     } else if (sub === "ls") {
       const s = await api("/api/state");
       for (const t of s.tickets) {
         if (isRunnerTicket(t)) continue; // a scout's runner or a draft's own ticket
-        console.log(`#${t.id}\t${t.status}\t${t.repo}\t${t.title}${t.source !== "local" ? `\t(${t.source}${t.confidence ? `, ${t.confidence}` : ""})` : ""}`);
+        console.log(`#${t.id}\t${t.status}\t${t.repo}\t${t.title}${t.source !== "local" ? `\t(${t.source}${t.confidence ? `, ${t.confidence}` : ""})` : ""}${t.builds_on ? `\tbuilds on #${t.builds_on}` : ""}`);
       }
     } else if (sub === "cancel") {
       const id = runArg(rest[0], "acutis ticket cancel <ticket-id>");
@@ -602,8 +613,10 @@ switch (cmd) {
       const r = await post(`/api/drafts/${id}/answer`, { answers, note: values.note ?? "" });
       console.log(`run ${r.id}: ${r.state}; the writer is revising (acutis draft show ${r.id})`);
     } else if (sub === "save") {
-      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { start: { type: "boolean" } } });
-      const out = await post(`/api/drafts/${runArg(positionals[0], "acutis draft save <run> [--start]")}/save`, { start: Boolean(values.start) });
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { start: { type: "boolean" }, "builds-on": { type: "string" } } });
+      const usage = "acutis draft save <run> [--start] [--builds-on N]";
+      const builds_on = values["builds-on"] ? runArg(values["builds-on"].replace(/^#/, ""), usage) : null;
+      const out = await post(`/api/drafts/${runArg(positionals[0], usage)}/save`, { start: Boolean(values.start), builds_on });
       console.log(`#${out.ticket.id} ${out.ticket.title}${out.run ? `\nrun ${out.run.id} started` : ""}`);
     } else if (sub === "discard") {
       const r = await post(`/api/drafts/${runArg(rest[0], "acutis draft discard <run>")}/discard`);

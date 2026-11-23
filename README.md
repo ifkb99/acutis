@@ -173,5 +173,17 @@ When you approve a run, Acutis describes the change and sets the bookmark
 rebases onto the current base bookmark (e.g. `main`), re-runs the checks if that moved anything,
 and advances the base bookmark, so the next ticket builds on this one.
 
+With `land: bookmark` or `push`, trunk only moves when you merge, so a follow-up ticket would start
+without the work before it. Mark it as building on that ticket instead:
+`bun src/cli.ts ticket add <repo> "<title>" --builds-on 15`, or
+`bun src/cli.ts ticket builds-on 16 15` for an existing ticket (`none` clears it). It can start once
+#15 has landed. Until #15 is merged into the base, its run starts on top of #15's landed work, and
+its review diff shows only its own changes. Its bookmark then stacks on #15's, so one branch or PR
+carries both. Once #15 is merged, it starts from the base as usual. Policy and checks always come
+from the base. Workers filing follow-up work (`request_work` with `follow_up`) link it to their own
+ticket. Merge with a merge commit: a squash or rebase merge gives #15 new commits, so Acutis still
+sees it as unmerged. Acutis never fetches, so run `jj git fetch` in the repo after merging on
+GitHub.
+
 Headless Chrome (or Chromium) is used for previews and browser checks; set `ACUTIS_CHROME` if it
 isn't on `PATH`.

@@ -230,6 +230,7 @@ describe("tickets and decisions from scouts", () => {
     await until(app, run.id, "done");
     const t = app.tickets.list({ repo: "demo" }).find((x) => x.title === "Upgrade the lockfile")!;
     expect(t.status).toBe("proposed");
+    expect(t.origin_run_id).toBe(run.id);
     expect(app.runs.acceptTicket(t.id).status).toBe("todo");
     expect(() => app.runs.acceptTicket(t.id)).toThrow(/not proposed/);
   });

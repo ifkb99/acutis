@@ -330,6 +330,8 @@ export function workerSystemPrompt(opts: {
   lessons?: GivenLesson[];
   /** Whether ask_librarian is actually offered (the setting, and a model to run it). */
   librarian?: boolean;
+  /** The ticket whose landed work (not yet on trunk) the workspace started on. */
+  stackedOn?: { id: number; title: string; trunk: string };
 }): string {
   const gates = opts.workflow.gates.length
     ? opts.workflow.gates.map((g) => `- \`${describeGate(g)}\``).join("\n")
@@ -353,7 +355,12 @@ ${opts.repo.notes.trim()}`
   return `# Acutis worker
 
 You are an Acutis worker assigned to ticket #${opts.ticket.id} in repository "${opts.ticket.repo}".
-You are working in an isolated workspace at ${opts.cwd}. Other agents may be working on other tickets in parallel workspaces.
+You are working in an isolated workspace at ${opts.cwd}. Other agents may be working on other tickets in parallel workspaces.${
+    opts.stackedOn
+      ? `
+This ticket builds on ticket #${opts.stackedOn.id} (${opts.stackedOn.title}), which has landed but isn't on ${opts.stackedOn.trunk} yet. Your workspace starts on top of its work, so its changes are already in your files; \`${opts.stackedOn.trunk}\` itself doesn't have them, so don't compare against it or try to fetch or rebase.`
+      : ""
+  }
 
 Rules:
 - Only create or modify files inside ${opts.cwd}.
@@ -382,7 +389,7 @@ Project knowledge: \`mcp__acutis__search_project\` searches this repo's docs (as
       : ""
   }
 
-${contractsSection(opts.workflow)}Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket. If your ticket can't be complete without work that belongs elsewhere (another package, a missing API), ask for it with \`mcp__acutis__request_work\` instead of doing it here.${opts.workflow.lessons ? " If you learn something about this repo that would save the next agent time (a build order, a quirk, a workaround the checks needed), propose it with `mcp__acutis__propose_lesson`." : ""}${preview}${notes}${decisionsSection(opts.decisions ?? [])}${lessonsSection(opts.lessons ?? [])}
+${contractsSection(opts.workflow)}Outside your ticket: if you notice a problem that isn't part of this ticket (a check already failing on the base, a bug elsewhere, stale docs, a security issue), don't fix it here. Record it with \`mcp__acutis__report_noticed\`, with evidence (file:line, a command and its output), then carry on with the ticket. If your ticket can't be complete without work that belongs elsewhere (another package, a missing API), ask for it with \`mcp__acutis__request_work\` instead of doing it here. For follow-up work that should come after your ticket and build on its changes, use \`mcp__acutis__request_work\` with \`follow_up: true\`: that ticket starts on top of your work once yours lands.${opts.workflow.lessons ? " If you learn something about this repo that would save the next agent time (a build order, a quirk, a workaround the checks needed), propose it with `mcp__acutis__propose_lesson`." : ""}${preview}${notes}${decisionsSection(opts.decisions ?? [])}${lessonsSection(opts.lessons ?? [])}
 
 End with a short summary: what you changed, why, and how you verified it.`;
 }

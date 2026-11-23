@@ -397,6 +397,34 @@ only they can decide.
   / `acutis lesson approve|reject|retire|edit|add`. Proposed lessons join the batched
   notifications. `lessons: false` turns off the tool, drafting and the prompt section.
 
+### Tickets that build on another (2026-11-22)
+
+- **Why:** with `land: bookmark`, trunk moves only when the operator merges. In dogfooding, #16 and
+  #17 were follow-ups of #15 and started on a trunk without it. The worker couldn't rebase its own
+  workspace, so the operator had to do it by hand.
+- **Model:** a ticket has `builds_on` (one parent, same repo; no cycles; set before it starts). Start
+  is refused (409) until the parent is `done`, and if the parent was cancelled.
+- **Where a run starts:** the parent's `landed_commit`, recorded when it landed (what was approved).
+  Older runs fall back to their bookmark; if neither is found, the run fails with a clear message.
+  If that commit is already in trunk (merged with a merge commit, or `land: trunk`), the run starts
+  from trunk as usual.
+- **Two commits per run:** `base_commit` is where the workspace started (the diff is from here, so
+  the review shows only this ticket's change), and `trunk_commit` is trunk at start. Policy is
+  loaded only from `trunk_commit`, also after a restart, because a stacked base is worker-written
+  work. Contract staleness is judged from it too, or the parent's own contract edits would read as
+  "changed on trunk". The library searches trunk's index; a stacked base isn't indexed or
+  described.
+- **Landing:** a bookmark landing stacks the child's bookmark on the parent's. `land: trunk`
+  refuses a stacked run whose start isn't in trunk, because `rebase -r @` would move only the
+  child's change and drop the parent's.
+- **Workers:** `request_work` has `follow_up: true` for work that comes after the worker's ticket;
+  the new ticket builds on the requester's own ticket, or (with `after`) on an earlier
+  follow-up the same run filed, so a plan's steps chain. Never on an arbitrary id. A child starts on
+  what was approved (`landed_commit`), not on later edits to the parent's bookmark. A stacked worker is
+  told what its workspace stands on and not to fetch or rebase.
+- **Not done:** epics (a group sharing one branch), a dashboard control (follows the Rose
+  dashboard work), and starting children automatically when their parent lands.
+
 ### Needs between areas (2026-11-22)
 
 - **`request_work(title, need, why)`** is for work a worker's ticket depends on that belongs
@@ -408,8 +436,9 @@ only they can decide.
   normalised share one ticket (and one notification). A request the operator rejected isn't filed
   again: the worker is told it was rejected. Each run can make three requests.
 - The requesting run gets a flag in its events. The worker is told to carry on and to say in its
-  summary what is unfinished until the requested work lands. Tickets have no dependency field, so
-  that link lives in the ticket body and the flag.
+  summary what is unfinished until the requested work lands. Tickets have no "waits on" field, so
+  that link lives in the ticket body and the flag. The other direction, a follow-up that builds on
+  the worker's ticket, is `follow_up: true` (see "Tickets that build on another").
 
 ### Contracts (2026-11-22, phase 4 of the scouts plan)
 

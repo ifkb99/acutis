@@ -43,7 +43,7 @@ function acutisServer(tools: AcutisTool[]) {
     tools: tools.map((t) => {
       const shape: Record<string, z.ZodTypeAny> = {};
       for (const [k, p] of Object.entries(t.params)) {
-        const base = p.type === "number" ? z.number() : z.string();
+        const base = p.type === "number" ? z.number() : p.type === "boolean" ? z.boolean() : z.string();
         shape[k] = (p.optional ? base.optional() : base).describe(p.description);
       }
       return tool(
@@ -52,7 +52,7 @@ function acutisServer(tools: AcutisTool[]) {
         shape,
         async (args) => {
           try {
-            const out = await t.handler(args as Record<string, string | number | undefined>);
+            const out = await t.handler(args as Record<string, string | number | boolean | undefined>);
             return {
               content: [
                 ...(out.images ?? []).map((i) => ({ type: "image" as const, data: i.data, mimeType: i.mimeType })),
