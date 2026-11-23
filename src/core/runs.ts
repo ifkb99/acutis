@@ -2000,6 +2000,7 @@ export class RunManager {
           source: "contract-request",
           status: "held",
           decision_id: d.id,
+          origin_run_id: runId,
         });
         this.deps.hub.ticket(t);
         this.deps.hub.emit(runId, "contract.request", { contract: name, decision: d.id, ticket: t.id, change });
@@ -2090,6 +2091,7 @@ export class RunManager {
           status: "proposed",
           // Only ever the requester's own ticket: a worker can't point tickets at arbitrary work.
           builds_on: followUp ? parent : null,
+          origin_run_id: runId,
         });
         this.deps.hub.ticket(t);
         this.deps.hub.emit(runId, "work.request", { ticket: t.id, title, status: t.status, ...(followUp ? { follow_up: true } : {}) });
@@ -2365,7 +2367,7 @@ export class RunManager {
       // Refuse before saving, so "save & start" doesn't leave a saved ticket and an error.
       if (input.start) this.checkBuildsOnLanded({ id: 0, repo: run.repo, builds_on: buildsOn });
     }
-    const ticket = this.deps.tickets.create({ repo: run.repo, title, body, source: WRITER_SOURCE, builds_on: buildsOn });
+    const ticket = this.deps.tickets.create({ repo: run.repo, title, body, source: WRITER_SOURCE, builds_on: buildsOn, origin_run_id: runId });
     this.deps.hub.ticket(ticket);
     this.deps.hub.emit(runId, "writer.saved", { ticket_id: ticket.id, edited: Boolean(view.draft && (title !== view.draft.title || body !== view.draft.body)) });
     const a = this.active.get(runId);
@@ -2786,7 +2788,7 @@ ${this.workSnapshot(repo)}${gapList}`;
             clip(args.body, 4000) || "(no detail)",
             ...(evidence ? ["", "Evidence:", evidence] : []),
           ].join("\n");
-          const t = this.deps.tickets.create({ repo: x.repo.name, title, body, source: scoutSource(type), status, confidence, decision_id: decisionId, noticed_id: noticedId });
+          const t = this.deps.tickets.create({ repo: x.repo.name, title, body, source: scoutSource(type), status, confidence, decision_id: decisionId, noticed_id: noticedId, origin_run_id: runId });
           if (status === "todo" && noticedId) this.deps.store.updateNoticed(noticedId, { status: "ticketed", ticket_id: t.id });
           // A gap closes when its ticket is accepted (now, if it went straight to todo).
           for (const g of gapIds) this.deps.store.updateGap(g, { ticket_id: t.id, status: status === "todo" ? "ticketed" : "open" });

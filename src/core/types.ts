@@ -32,6 +32,8 @@ export interface Ticket {
    * work is merged into trunk (land: bookmark or push), so a follow-up sees what came before it.
    */
   builds_on: number | null;
+  /** The run that filed this ticket: a scout's propose_ticket, a worker's request_work or contract request, or a writer's saved draft. Null for operator tickets. */
+  origin_run_id: number | null;
   external_id: string | null;
   created_at: string;
   updated_at: string;
@@ -117,6 +119,7 @@ export interface TicketSource {
     decision_id?: number | null;
     noticed_id?: number | null;
     builds_on?: number | null;
+    origin_run_id?: number | null;
   }): Ticket;
   /** Set or clear the ticket this one builds on (validated by the caller). */
   setBuildsOn(id: number, buildsOn: number | null): Ticket;

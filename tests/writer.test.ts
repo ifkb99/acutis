@@ -109,6 +109,7 @@ describe("ticket writer", () => {
     const saved = visibleTickets(app);
     expect(saved.map((t) => [t.title, t.status, t.source])).toEqual([["Group the run list by state", "todo", "writer"]]);
     expect(saved[0]!.body).toContain("- [ ] newest first");
+    expect(saved[0]!.origin_run_id).toBe(run.id);
     expect(state(app, run.id)).toBe("done");
     expect(app.runs.draft(run.id).saved).toEqual({ ticket_id: saved[0]!.id });
     expect(app.runs.listDrafts()).toEqual([]);
