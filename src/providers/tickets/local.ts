@@ -23,8 +23,8 @@ export class LocalTicketSource implements TicketSource {
   create(input: Parameters<TicketSource["create"]>[0]): Ticket {
     const row = this.store.db
       .query<{ id: number }, any>(
-        `INSERT INTO tickets (repo, title, body, source, status, confidence, decision_id, noticed_id, builds_on, origin_run_id)
-         VALUES ($repo, $title, $body, $source, $status, $confidence, $decision_id, $noticed_id, $builds_on, $origin_run_id) RETURNING id`,
+        `INSERT INTO tickets (repo, title, body, source, status, confidence, decision_id, noticed_id, builds_on, origin_run_id, epic_id)
+         VALUES ($repo, $title, $body, $source, $status, $confidence, $decision_id, $noticed_id, $builds_on, $origin_run_id, $epic_id) RETURNING id`,
       )
       .get({
         repo: input.repo,
@@ -37,6 +37,7 @@ export class LocalTicketSource implements TicketSource {
         noticed_id: input.noticed_id ?? null,
         builds_on: input.builds_on ?? null,
         origin_run_id: input.origin_run_id ?? null,
+        epic_id: input.epic_id ?? null,
       })!;
     return this.get(row.id)!;
   }
@@ -70,6 +71,13 @@ export class LocalTicketSource implements TicketSource {
     this.store.db
       .query("UPDATE tickets SET builds_on = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
       .run(buildsOn, id);
+    return this.get(id)!;
+  }
+
+  setEpic(id: number, epicId: number | null): Ticket {
+    this.store.db
+      .query("UPDATE tickets SET epic_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?")
+      .run(epicId, id);
     return this.get(id)!;
   }
 

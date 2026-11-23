@@ -185,5 +185,17 @@ ticket. Merge with a merge commit: a squash or rebase merge gives #15 new commit
 sees it as unmerged. Acutis never fetches, so run `jj git fetch` in the repo after merging on
 GitHub.
 
+For a larger change made of several tickets, use an epic: its tickets build one branch together,
+and it goes to the base as one PR. `bun src/cli.ts epic add <repo> "<title>"` prints its id and
+branch (`acutis/epic-<id>-<slug>`). Then add tickets with `ticket add … --epic <id>`, or
+`ticket epic <ticket> <id>` for an existing one. Each ticket's run starts on the branch's tip, and
+approving it moves the branch forward (no per-ticket bookmark). Two of its tickets can be in review
+at once: the second is rebased onto the moved branch and checked again when you approve it, and
+goes back to review if that conflicts or fails. Policy and checks still come from the base. Within
+an epic, `--builds-on` only orders tickets (the child waits for its parent). A worker's follow-up
+joins its ticket's epic. Push the branch and open one PR; once it's merged, `epic close <id>` (its
+tickets must be done or cancelled). `epic ls` and `epic show <id>` list epics and their tickets.
+Epics need `land: bookmark` or `push`; a `land: trunk` repo refuses them.
+
 Headless Chrome (or Chromium) is used for previews and browser checks; set `ACUTIS_CHROME` if it
 isn't on `PATH`.

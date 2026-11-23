@@ -172,9 +172,11 @@ export class JjWorkspaceProvider implements WorkspaceProvider {
     return { moved, conflicts: conflicts.length ? conflicts : ["(unknown files)"] };
   }
 
-  async advance(_repo: Repo, ws: Workspace, bookmark: string) {
-    // No --allow-backwards: if trunk moved sideways since the rebase, this fails instead of dropping work.
+  async advance(_repo: Repo, ws: Workspace, bookmark: string, opts: { push?: boolean } = {}) {
+    // No --allow-backwards: if the bookmark moved sideways since the rebase, this fails instead of
+    // dropping work. (set creates the bookmark if it doesn't exist yet.)
     await jj(ws.path, ["bookmark", "set", bookmark, "-r", "@"]);
+    if (opts.push) await jj(ws.path, ["git", "push", "--bookmark", bookmark]);
   }
 
   async refresh(repo: Repo): Promise<void> {

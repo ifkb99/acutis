@@ -5,7 +5,7 @@ import type { Draft, RankedDecision } from "../src/dashboard/state";
 
 const ts = "2026-01-01T00:00:00Z";
 const ticket = (id: number, o: Partial<Ticket> = {}): Ticket => ({
-  id, repo: "r", title: `T${id}`, body: "", status: "todo", source: "local", confidence: null, decision_id: null, noticed_id: null, builds_on: null, origin_run_id: null, external_id: null, created_at: ts, updated_at: ts, ...o,
+  id, repo: "r", title: `T${id}`, body: "", status: "todo", source: "local", confidence: null, decision_id: null, noticed_id: null, builds_on: null, origin_run_id: null, epic_id: null, external_id: null, created_at: ts, updated_at: ts, ...o,
 });
 const run = (id: number, ticket_id: number, o: Partial<Run> = {}): Run => ({
   id, ticket_id, repo: "r", kind: "work", scout: null, woken_by: null, state: "running", workspace_name: null, workspace_path: null, base_commit: null, trunk_commit: null, landed_commit: null,

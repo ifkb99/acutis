@@ -332,6 +332,8 @@ export function workerSystemPrompt(opts: {
   librarian?: boolean;
   /** The ticket whose landed work (not yet on trunk) the workspace started on. */
   stackedOn?: { id: number; title: string; trunk: string };
+  /** The epic whose branch (not yet on trunk) the workspace started on. */
+  epic?: { id: number; title: string; bookmark: string; trunk: string };
 }): string {
   const gates = opts.workflow.gates.length
     ? opts.workflow.gates.map((g) => `- \`${describeGate(g)}\``).join("\n")
@@ -356,7 +358,10 @@ ${opts.repo.notes.trim()}`
 
 You are an Acutis worker assigned to ticket #${opts.ticket.id} in repository "${opts.ticket.repo}".
 You are working in an isolated workspace at ${opts.cwd}. Other agents may be working on other tickets in parallel workspaces.${
-    opts.stackedOn
+    opts.epic
+      ? `
+This ticket is part of epic ${opts.epic.id} (${opts.epic.title}). Your workspace starts on the epic's branch, \`${opts.epic.bookmark}\`, which holds the work of the epic's earlier tickets and isn't on ${opts.epic.trunk} yet, so their changes are already in your files; \`${opts.epic.trunk}\` itself doesn't have them, so don't compare against it or try to fetch or rebase.`
+      : opts.stackedOn
       ? `
 This ticket builds on ticket #${opts.stackedOn.id} (${opts.stackedOn.title}), which has landed but isn't on ${opts.stackedOn.trunk} yet. Your workspace starts on top of its work, so its changes are already in your files; \`${opts.stackedOn.trunk}\` itself doesn't have them, so don't compare against it or try to fetch or rebase.`
       : ""

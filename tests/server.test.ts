@@ -128,3 +128,31 @@ test("tickets can be created building on another, and the link set or cleared", 
   const cleared = await (await post(`/api/tickets/${b.id}/builds-on`, { builds_on: null })).json();
   expect(cleared.builds_on).toBeNull();
 });
+
+test("epics can be created, listed, joined and closed", async () => {
+  const { makeRepo } = await import("./helpers");
+  app.store.addRepo({ name: "epics", path: await makeRepo(), base: "main" });
+  const h = { ...auth, "x-acutis": "1", "content-type": "application/json" };
+  const post = (path: string, b: unknown) => fetch(`${base}${path}`, { method: "POST", headers: h, body: JSON.stringify(b) });
+  const get = async (path: string) => (await fetch(`${base}${path}`, { headers: auth })).json() as Promise<any>;
+  expect((await post("/api/epics", { repo: "epics" })).status).toBe(400);
+  const e = await (await post("/api/epics", { repo: "epics", title: "Big change" })).json();
+  expect(e.bookmark).toBe(`acutis/epic-${e.id}-big-change`);
+  const t = await (await post("/api/tickets", { repo: "epics", title: "Part one", epic_id: e.id })).json();
+  expect(t.epic_id).toBe(e.id);
+  expect((await post("/api/tickets", { repo: "epics", title: "x", epic_id: "x" })).status).toBe(400);
+  expect((await post("/api/tickets", { repo: "epics", title: "x", epic_id: 99999 })).status).toBe(404);
+  const u = await (await post("/api/tickets", { repo: "epics", title: "Part two" })).json();
+  expect((await (await post(`/api/tickets/${u.id}/epic`, { epic_id: e.id })).json()).epic_id).toBe(e.id);
+  const detail = await get(`/api/epics/${e.id}`);
+  expect(detail.tickets.map((x: any) => x.id)).toEqual([t.id, u.id]);
+  expect(detail.tip).toBeNull();
+  expect((await get("/api/epics?repo=epics")).map((x: any) => x.id)).toEqual([e.id]);
+  expect((await get("/api/state")).epics.some((x: any) => x.id === e.id)).toBe(true);
+  // Closing waits for its tickets; taking them out (or finishing them) lets it close.
+  expect((await post(`/api/epics/${e.id}/close`, {})).status).toBe(409);
+  await post(`/api/tickets/${t.id}/epic`, { epic_id: null });
+  await post(`/api/tickets/${u.id}/cancel`, {});
+  expect((await (await post(`/api/epics/${e.id}/close`, {})).json()).status).toBe("closed");
+  expect(await get("/api/epics?repo=epics")).toEqual([]);
+});

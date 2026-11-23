@@ -34,7 +34,24 @@ export interface Ticket {
   builds_on: number | null;
   /** The run that filed this ticket: a scout's propose_ticket, a worker's request_work or contract request, or a writer's saved draft. Null for operator tickets. */
   origin_run_id: number | null;
+  /** The epic this ticket belongs to: its runs start on the epic's branch and land onto it. */
+  epic_id: number | null;
   external_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A group of tickets that build up one branch together: each ticket's run starts on the epic's
+ * bookmark and lands by moving it forward, and the epic goes to trunk as one unit (one PR).
+ */
+export interface Epic {
+  id: number;
+  repo: string;
+  title: string;
+  status: "open" | "closed";
+  /** acutis/epic-<id>-<slug>; it exists once the first ticket lands. */
+  bookmark: string;
   created_at: string;
   updated_at: string;
 }
@@ -120,7 +137,10 @@ export interface TicketSource {
     noticed_id?: number | null;
     builds_on?: number | null;
     origin_run_id?: number | null;
+    epic_id?: number | null;
   }): Ticket;
+  /** Put the ticket in an epic, or take it out (validated by the caller). */
+  setEpic(id: number, epicId: number | null): Ticket;
   /** Set or clear the ticket this one builds on (validated by the caller). */
   setBuildsOn(id: number, buildsOn: number | null): Ticket;
   /** Transactional claim: returns false if the ticket is not claimable. */
@@ -159,8 +179,11 @@ export interface WorkspaceProvider {
    * conflict (empty on success) and whether the change actually moved.
    */
   rebase(repo: Repo, ws: Workspace, onto: string): Promise<{ moved: boolean; conflicts: string[] }>;
-  /** Move a trunk bookmark forward to the workspace's change. Fails if that isn't a fast-forward. */
-  advance(repo: Repo, ws: Workspace, bookmark: string): Promise<void>;
+  /**
+   * Move a bookmark forward to the workspace's change (creating it if it doesn't exist), and push
+   * it if asked. Fails if that isn't a fast-forward.
+   */
+  advance(repo: Repo, ws: Workspace, bookmark: string, opts?: { push?: boolean }): Promise<void>;
   /** True if `name` is a local bookmark in the repo. */
   isBookmark(repo: Repo, name: string): Promise<boolean>;
   /** True if `ancestor` is `descendant` or one of its ancestors. */

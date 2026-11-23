@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Decision, Lesson, LibraryGap, Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
+import type { Decision, Epic, Lesson, LibraryGap, Noticed, NoticedKind, Repo, Run, RunEvent, RunState } from "./types";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS repos (
@@ -109,6 +109,15 @@ CREATE TABLE IF NOT EXISTS lessons (
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   decided_at TEXT
 );
+CREATE TABLE IF NOT EXISTS epics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL REFERENCES repos(name),
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  bookmark TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 CREATE TABLE IF NOT EXISTS trunk_seen (
   repo TEXT PRIMARY KEY,
   commit_id TEXT NOT NULL,
@@ -147,6 +156,7 @@ export class Store {
     if (!has("tickets", "builds_on")) this.db.exec("ALTER TABLE tickets ADD COLUMN builds_on INTEGER");
     if (!has("runs", "trunk_commit")) this.db.exec("ALTER TABLE runs ADD COLUMN trunk_commit TEXT");
     if (!has("runs", "landed_commit")) this.db.exec("ALTER TABLE runs ADD COLUMN landed_commit TEXT");
+    if (!has("tickets", "epic_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN epic_id INTEGER");
     if (!has("lessons", "stale")) this.db.exec("ALTER TABLE lessons ADD COLUMN stale TEXT");
   }
 
@@ -166,6 +176,27 @@ export class Store {
   setRepoNotes(name: string, notes: string): Repo {
     this.db.query("UPDATE repos SET notes = ? WHERE name = ?").run(notes, name);
     return this.getRepo(name)!;
+  }
+
+  // ---- epics
+  addEpic(e: { repo: string; title: string; slug: string }): Epic {
+    const { id } = this.db
+      .query<{ id: number }, [string, string]>("INSERT INTO epics (repo, title) VALUES (?, ?) RETURNING id")
+      .get(e.repo, e.title)!;
+    this.db.query("UPDATE epics SET bookmark = ? WHERE id = ?").run(`acutis/epic-${id}${e.slug ? `-${e.slug}` : ""}`, id);
+    return this.getEpic(id)!;
+  }
+  getEpic(id: number): Epic | null {
+    return this.db.query<Epic, [number]>("SELECT * FROM epics WHERE id = ?").get(id);
+  }
+  listEpics(filter: { repo?: string; status?: Epic["status"] } = {}): Epic[] {
+    return this.db
+      .query<Epic, [string | null, string | null]>("SELECT * FROM epics WHERE (?1 IS NULL OR repo = ?1) AND (?2 IS NULL OR status = ?2) ORDER BY id")
+      .all(filter.repo ?? null, filter.status ?? null);
+  }
+  setEpicStatus(id: number, status: Epic["status"]): Epic {
+    this.db.query("UPDATE epics SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?").run(status, id);
+    return this.getEpic(id)!;
   }
 
   // ---- runs
