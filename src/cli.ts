@@ -20,11 +20,19 @@ Repos and tickets
   acutis repo add <path> [--name N] [--base REV] [--init-jj]
   acutis repo ls
   acutis repo notes <repo> [--set TEXT | --file PATH]   Show or set operator notes for workers
-  acutis ticket add <repo> <title> [--body TEXT | --body-file PATH] [--builds-on N]
+  acutis ticket add <repo> <title> [--body TEXT | --body-file PATH] [--builds-on N] [--epic E]
                                                --builds-on: start from ticket #N's landed work, even before it's merged
+                                               --epic: work on epic E's shared branch
   acutis ticket builds-on <ticket-id> <N|none> Set or clear the ticket a not-yet-started ticket builds on
+  acutis ticket epic <ticket-id> <E|none>      Put a not-yet-started ticket in epic E, or take it out
   acutis ticket ls
   acutis ticket cancel <ticket-id>
+
+Epics (tickets that build one branch, acutis/epic-<id>-…, together; it goes to trunk as one PR)
+  acutis epic add <repo> <title>               Start an epic
+  acutis epic ls [--all]                       Open epics (--all: closed ones too) and their tickets
+  acutis epic show <id>                        An epic's branch and tickets
+  acutis epic close <id>                       Close it once its branch is merged (its tickets must be done or cancelled)
   acutis proposed                              Tickets scouts filed that wait for you
   acutis accept|reject <ticket-id>             Accept a proposed ticket onto todo, or reject it
   acutis library <repo>                        Indexed doc commits, and how far describing got (with its cost)
@@ -49,7 +57,7 @@ Ticket drafts (an agent reads the repo and writes a ticket from your request, as
   acutis draft answer <run> [--a N=TEXT]... [--decide N]... [--note TEXT]
                                                Answer questions (--decide: also keep the answer as a repo decision)
                                                and/or ask for a revision; the writer continues
-  acutis draft save <run> [--start] [--builds-on N]
+  acutis draft save <run> [--start] [--builds-on N] [--epic E]
                                                Save the latest draft as a todo ticket (--start: and start it)
   acutis draft discard <run>
 
@@ -483,14 +491,15 @@ switch (cmd) {
       const { values, positionals } = parseArgs({
         args: rest,
         allowPositionals: true,
-        options: { body: { type: "string" }, "body-file": { type: "string" }, "builds-on": { type: "string" } },
+        options: { body: { type: "string" }, "body-file": { type: "string" }, "builds-on": { type: "string" }, epic: { type: "string" } },
       });
       const [repo, ...title] = positionals;
-      if (!repo || !title.length) die("usage: acutis ticket add <repo> <title> [--body TEXT | --body-file PATH] [--builds-on N]");
+      if (!repo || !title.length) die("usage: acutis ticket add <repo> <title> [--body TEXT | --body-file PATH] [--builds-on N] [--epic E]");
       const body = values["body-file"] ? await Bun.file(values["body-file"]).text() : values.body ?? "";
       const builds_on = values["builds-on"] ? runArg(values["builds-on"].replace(/^#/, ""), "--builds-on takes a ticket id") : null;
-      const t = await post("/api/tickets", { repo, title: title.join(" "), body, builds_on });
-      console.log(`#${t.id} ${t.title}${t.builds_on ? ` (builds on #${t.builds_on})` : ""}`);
+      const epic_id = values.epic ? runArg(values.epic, "--epic takes an epic id") : null;
+      const t = await post("/api/tickets", { repo, title: title.join(" "), body, builds_on, epic_id });
+      console.log(`#${t.id} ${t.title}${t.builds_on ? ` (builds on #${t.builds_on})` : ""}${t.epic_id ? ` (epic ${t.epic_id})` : ""}`);
     } else if (sub === "builds-on") {
       const usage = "acutis ticket builds-on <ticket-id> <N|none>";
       const id = runArg(rest[0], usage);
@@ -498,11 +507,18 @@ switch (cmd) {
       const builds_on = rest[1] === "none" ? null : runArg(rest[1].replace(/^#/, ""), usage);
       const t = await post(`/api/tickets/${id}/builds-on`, { builds_on });
       console.log(t.builds_on ? `#${t.id} builds on #${t.builds_on}` : `#${t.id} starts from trunk`);
+    } else if (sub === "epic") {
+      const usage = "acutis ticket epic <ticket-id> <E|none>";
+      const id = runArg(rest[0], usage);
+      if (!rest[1]) die(`usage: ${usage}`);
+      const epic_id = rest[1] === "none" ? null : runArg(rest[1], usage);
+      const t = await post(`/api/tickets/${id}/epic`, { epic_id });
+      console.log(t.epic_id ? `#${t.id} is in epic ${t.epic_id}` : `#${t.id} is in no epic`);
     } else if (sub === "ls") {
       const s = await api("/api/state");
       for (const t of s.tickets) {
         if (isRunnerTicket(t)) continue; // a scout's runner or a draft's own ticket
-        console.log(`#${t.id}\t${t.status}\t${t.repo}\t${t.title}${t.source !== "local" ? `\t(${t.source}${t.confidence ? `, ${t.confidence}` : ""})` : ""}${t.builds_on ? `\tbuilds on #${t.builds_on}` : ""}`);
+        console.log(`#${t.id}\t${t.status}\t${t.repo}\t${t.title}${t.source !== "local" ? `\t(${t.source}${t.confidence ? `, ${t.confidence}` : ""})` : ""}${t.builds_on ? `\tbuilds on #${t.builds_on}` : ""}${t.epic_id ? `\tepic ${t.epic_id}` : ""}`);
       }
     } else if (sub === "cancel") {
       const id = runArg(rest[0], "acutis ticket cancel <ticket-id>");
@@ -510,6 +526,31 @@ switch (cmd) {
       console.log(`#${t.id} ${t.status}`);
     } else die(USAGE);
     break;
+  case "epic": {
+    const line = (t: any) => `  #${t.id}\t${t.status}\t${t.title}${t.builds_on ? `\tbuilds on #${t.builds_on}` : ""}`;
+    if (sub === "add") {
+      const [repo, ...title] = rest;
+      if (!repo || !title.length) die("usage: acutis epic add <repo> <title>");
+      const e = await post("/api/epics", { repo, title: title.join(" ") });
+      console.log(`Epic ${e.id}: ${e.title}\nbranch: ${e.bookmark} (created when its first ticket lands)\nAdd tickets with: acutis ticket add ${e.repo} <title> --epic ${e.id}  or  acutis ticket epic <ticket-id> ${e.id}`);
+    } else if (sub === "ls") {
+      const all = rest.includes("--all");
+      const epics = await api(`/api/epics${all ? "?status=all" : ""}`);
+      if (!epics.length) console.log(all ? "No epics." : "No open epics.");
+      for (const e of epics) {
+        const done = e.tickets.filter((t: any) => t.status === "done").length;
+        console.log(`epic ${e.id}\t${e.status}\t${e.repo}\t${e.title}\t${done}/${e.tickets.length} done\t${e.bookmark}`);
+      }
+    } else if (sub === "show") {
+      const e = await api(`/api/epics/${runArg(rest[0], "acutis epic show <id>")}`);
+      console.log(`Epic ${e.id} (${e.status}) · ${e.repo} · ${e.title}\nbranch: ${e.bookmark}${e.tip ? ` at ${e.tip.slice(0, 12)}${e.on_trunk ? " (on trunk)" : ""}` : " (not created yet)"}`);
+      console.log(e.tickets.length ? e.tickets.map(line).join("\n") : "  (no tickets yet)");
+    } else if (sub === "close") {
+      const e = await post(`/api/epics/${runArg(rest[0], "acutis epic close <id>")}/close`);
+      console.log(`epic ${e.id}: ${e.status}`);
+    } else die(USAGE);
+    break;
+  }
   case "dashboard":
     console.log(dashboardLink());
     break;
@@ -613,10 +654,11 @@ switch (cmd) {
       const r = await post(`/api/drafts/${id}/answer`, { answers, note: values.note ?? "" });
       console.log(`run ${r.id}: ${r.state}; the writer is revising (acutis draft show ${r.id})`);
     } else if (sub === "save") {
-      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { start: { type: "boolean" }, "builds-on": { type: "string" } } });
-      const usage = "acutis draft save <run> [--start] [--builds-on N]";
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { start: { type: "boolean" }, "builds-on": { type: "string" }, epic: { type: "string" } } });
+      const usage = "acutis draft save <run> [--start] [--builds-on N] [--epic E]";
       const builds_on = values["builds-on"] ? runArg(values["builds-on"].replace(/^#/, ""), usage) : null;
-      const out = await post(`/api/drafts/${runArg(positionals[0], usage)}/save`, { start: Boolean(values.start), builds_on });
+      const epic_id = values.epic ? runArg(values.epic, usage) : null;
+      const out = await post(`/api/drafts/${runArg(positionals[0], usage)}/save`, { start: Boolean(values.start), builds_on, epic_id });
       console.log(`#${out.ticket.id} ${out.ticket.title}${out.run ? `\nrun ${out.run.id} started` : ""}`);
     } else if (sub === "discard") {
       const r = await post(`/api/drafts/${runArg(rest[0], "acutis draft discard <run>")}/discard`);

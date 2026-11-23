@@ -422,8 +422,38 @@ only they can decide.
   follow-up the same run filed, so a plan's steps chain. Never on an arbitrary id. A child starts on
   what was approved (`landed_commit`), not on later edits to the parent's bookmark. A stacked worker is
   told what its workspace stands on and not to fetch or rebase.
-- **Not done:** epics (a group sharing one branch), a dashboard control (follows the Rose
-  dashboard work), and starting children automatically when their parent lands.
+- **Not done:** epics (a group sharing one branch; done next, below), a dashboard control
+  (follows the Rose dashboard work), and starting children automatically when their parent lands.
+
+### Epics (2026-11-23)
+
+- **Why:** builds-on stacks one ticket on another, but a larger change of several tickets still
+  ends up as a chain of per-ticket bookmarks and PRs. An epic gives them one branch and one PR.
+- **Model:** an `epics` row (repo, title, `open`/`closed`, bookmark `acutis/epic-<id>-<slug>`) and
+  `tickets.epic_id`, set only before a ticket starts. The bookmark is created when the first ticket
+  lands.
+- **Start:** an epic ticket starts on the bookmark's tip, or on trunk while the bookmark doesn't
+  exist yet or its tip is already in trunk (merged with a merge commit). It's checked at `start`
+  (409 before claiming) and worked out again in `prepare`. A missing bookmark after a ticket has
+  landed is a clear error, not a fresh start. The worker is told it is on the epic's branch.
+- **Land:** approving moves the epic's bookmark forward to the change, never backwards or sideways
+  (`advance`, not the `--allow-backwards` used for per-ticket bookmarks), and pushes it under
+  `land: push`. If the tip moved since the run started (a sibling landed), the change is rebased
+  onto it and the checks run again, since nobody checked that combination. A conflict or failure
+  goes back to review with the bookmark unmoved. Only `base_commit` moves: `trunk_commit` and the
+  workflow stay the trunk ones, so an earlier ticket's `.acutis/workflow.md` edit never becomes
+  policy (also after a restart). Landings in a repo are already serialised, so two approvals can't
+  race on the bookmark.
+- **builds_on with epics:** inside an epic it only orders tickets. A ticket that builds on one in an
+  open epic must be in that epic. An epic ticket whose parent's landed work isn't on the branch or
+  on trunk is refused. A child of a ticket in a closed epic starts from trunk, because closed
+  epics may have been squash-merged. A worker's `request_work` follow-up joins the requester's
+  epic.
+- **Closing:** explicit (`epic close`), once all its tickets are done or cancelled. It isn't
+  inferred from ancestry, since a squash merge is a natural way to land an epic.
+- **Not done:** `land: trunk` epics (rebasing a whole branch onto trunk and checking it before
+  advancing); epics refuse that mode. Also not done: a dashboard control, and starting the next
+  ticket automatically when one lands.
 
 ### Needs between areas (2026-11-22)
 

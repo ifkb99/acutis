@@ -51,6 +51,7 @@ import type {
   CommandGate,
   CommandSandbox,
   Decision,
+  Epic,
   Gate,
   LibraryGap,
   Noticed,
@@ -105,6 +106,8 @@ interface Active {
   trunkCommit: string;
   /** The ticket whose landed work, not yet on trunk, the workspace started on; null when it started on trunk. */
   stackedOn: Ticket | null;
+  /** The epic whose branch (not yet on trunk) the workspace started on; null when it started on trunk. */
+  epic: Epic | null;
   session: AgentSession | null;
   /** Set right before we interrupt or close, so the resulting agent events aren't treated as failures. */
   intent: "pause" | "redirect" | "kill" | "close" | null;
@@ -364,6 +367,9 @@ export class RunManager {
     const repo = store.getRepo(ticket.repo);
     if (!repo) throw new RunError(`repo "${ticket.repo}" is not registered`, 404);
     this.checkBuildsOnLanded(ticket);
+    // An epic ticket's start point needs jj; check it now so a bad one is refused, not a failed run.
+    // prepare works it out again (the branch may move in between).
+    if (ticket.epic_id) await this.epicStartPoint(repo, ticket, await this.deps.workspaces.resolve(repo, repo.base));
     if (!tickets.claim(ticketId)) throw new RunError(`ticket #${ticketId} is not in "todo"`, 409);
     hub.ticket(tickets.get(ticketId)!);
 
@@ -419,10 +425,22 @@ export class RunManager {
    * Squash or rebase merges give the work new commits, so it's taken as not on trunk; merge with a
    * merge commit (or clear the link) to start such tickets from trunk again.
    */
-  private async startPoint(repo: Repo, ticket: Ticket, trunk: string): Promise<{ commit: string; stackedOn: Ticket | null; msg: string | null }> {
-    if (!ticket.builds_on) return { commit: trunk, stackedOn: null, msg: null };
+  private async startPoint(repo: Repo, ticket: Ticket, trunk: string): Promise<{ commit: string; stackedOn: Ticket | null; epic: Epic | null; msg: string | null }> {
+    if (ticket.epic_id) return this.epicStartPoint(repo, ticket, trunk);
+    if (!ticket.builds_on) return { commit: trunk, stackedOn: null, epic: null, msg: null };
     const parent = this.deps.tickets.get(ticket.builds_on);
     if (!parent || parent.status !== "done") this.checkBuildsOnLanded(ticket);
+    const parentEpic = parent!.epic_id ? this.deps.store.getEpic(parent!.epic_id) : null;
+    if (parentEpic?.status === "open") {
+      throw new RunError(
+        `ticket #${ticket.id} builds on #${parent!.id}, which is in epic ${parentEpic.id}: put #${ticket.id} in that epic too (acutis ticket epic ${ticket.id} ${parentEpic.id}), or clear the link`,
+        409,
+      );
+    }
+    if (parentEpic) {
+      // A closed epic went to trunk as one unit (or was given up): its commits may have been squashed.
+      return { commit: trunk, stackedOn: null, epic: null, msg: `Builds on #${parent!.id}, whose epic ${parentEpic.id} is closed: starting from ${repo.base}` };
+    }
     const landedRun = this.landedRunOf(parent!.id);
     if (!landedRun) throw new RunError(`ticket #${ticket.id} builds on #${parent!.id}, but #${parent!.id} has no landed run; clear the link to start from ${repo.base}`, 409);
     let commit = landedRun.landed_commit;
@@ -437,13 +455,138 @@ export class RunManager {
       );
     }
     if (await this.deps.workspaces.isAncestor(repo, commit, trunk)) {
-      return { commit: trunk, stackedOn: null, msg: `Builds on #${parent!.id}, which is on ${repo.base}: starting from ${repo.base}` };
+      return { commit: trunk, stackedOn: null, epic: null, msg: `Builds on #${parent!.id}, which is on ${repo.base}: starting from ${repo.base}` };
     }
     return {
       commit,
       stackedOn: parent!,
+      epic: null,
       msg: `Builds on #${parent!.id} (${parent!.title}), landed as ${landedRun.bookmark ?? "a bookmark"} but not on ${repo.base} yet: starting on top of it (${commit.slice(0, 12)}). The review diff shows only this ticket's changes; policy and checks still come from ${repo.base}.`,
     };
+  }
+
+  /**
+   * Where an epic ticket's run starts: the epic's branch tip, or trunk while the branch doesn't
+   * exist yet (no ticket has landed) or is already on trunk (merged with a merge commit). A ticket
+   * it builds on must have its landed work in that start.
+   */
+  private async epicStartPoint(repo: Repo, ticket: Ticket, trunk: string): Promise<{ commit: string; stackedOn: null; epic: Epic | null; msg: string }> {
+    const { workspaces, store } = this.deps;
+    const epic = store.getEpic(ticket.epic_id!);
+    if (!epic) throw new RunError(`ticket #${ticket.id} is in epic ${ticket.epic_id}, which no longer exists; take it out (acutis ticket epic ${ticket.id} none)`, 409);
+    if (epic.status !== "open") {
+      throw new RunError(`ticket #${ticket.id} is in epic ${epic.id}, which is closed. Take it out (acutis ticket epic ${ticket.id} none) to start it from ${repo.base}.`, 409);
+    }
+    let start: { commit: string; epic: Epic | null; msg: string };
+    if (!(await workspaces.isBookmark(repo, epic.bookmark))) {
+      const landed = this.epicTickets(epic.id).filter((t) => t.status === "done" && this.landedRunOf(t.id));
+      if (landed.length) {
+        throw new RunError(
+          `epic ${epic.id}'s branch ${epic.bookmark} is gone, but ${landed.map((t) => `#${t.id}`).join(", ")} landed on it. Recreate the bookmark, or close the epic.`,
+          409,
+        );
+      }
+      start = { commit: trunk, epic: null, msg: `Epic ${epic.id} (${epic.title}): nothing has landed on it yet, so starting from ${repo.base}; landing creates ${epic.bookmark}` };
+    } else {
+      const tip = await workspaces.resolve(repo, epic.bookmark);
+      start = (await workspaces.isAncestor(repo, tip, trunk))
+        ? { commit: trunk, epic: null, msg: `Epic ${epic.id} (${epic.title}): ${epic.bookmark} is already on ${repo.base}, so starting from ${repo.base}` }
+        : {
+            commit: tip,
+            epic,
+            msg: `Epic ${epic.id} (${epic.title}): starting on its branch ${epic.bookmark} (${tip.slice(0, 12)}), which isn't on ${repo.base} yet. The review diff shows only this ticket's changes; policy and checks still come from ${repo.base}.`,
+          };
+    }
+    if (ticket.builds_on) {
+      this.checkBuildsOnLanded(ticket);
+      const run = this.landedRunOf(ticket.builds_on)!;
+      const landed = run.landed_commit ?? (run.bookmark ? await workspaces.resolve(repo, run.bookmark).catch(() => null) : null);
+      if (!landed || !(await workspaces.isAncestor(repo, landed, start.commit))) {
+        throw new RunError(
+          `ticket #${ticket.id} is in epic ${epic.id} and builds on #${ticket.builds_on}, whose landed work isn't on the epic's branch or on ${repo.base}. Merge it into ${repo.base} first, or clear the link.`,
+          409,
+        );
+      }
+    }
+    return { ...start, stackedOn: null };
+  }
+
+  private epicTickets(epicId: number): Ticket[] {
+    return this.deps.tickets.list().filter((t) => t.epic_id === epicId);
+  }
+
+  // ------------------------------------------------------------------ epics
+
+  createEpic(repo: string, title: string): Epic {
+    if (!this.deps.store.getRepo(repo)) throw new RunError(`unknown repo "${repo}"`, 400);
+    const t = title.replace(/\s+/g, " ").trim();
+    if (!t) throw new RunError("the epic needs a title", 400);
+    return this.deps.store.addEpic({ repo, title: clip(t, 200), slug: slug(t) });
+  }
+
+  listEpics(filter: { repo?: string; all?: boolean } = {}): (Epic & { tickets: Ticket[] })[] {
+    return this.deps.store
+      .listEpics({ repo: filter.repo, status: filter.all ? undefined : "open" })
+      .map((e) => ({ ...e, tickets: this.epicTickets(e.id) }));
+  }
+
+  getEpic(id: number): Epic & { tickets: Ticket[] } {
+    const e = this.deps.store.getEpic(id);
+    if (!e) throw new RunError(`epic ${id} not found`, 404);
+    return { ...e, tickets: this.epicTickets(id) };
+  }
+
+  /** An epic with its tickets, its branch tip (null until the first ticket lands) and whether that is on trunk. */
+  async epicDetail(id: number): Promise<Epic & { tickets: Ticket[]; tip: string | null; on_trunk: boolean }> {
+    const e = this.getEpic(id);
+    const repo = this.deps.store.getRepo(e.repo)!;
+    const { workspaces } = this.deps;
+    const tip = (await workspaces.isBookmark(repo, e.bookmark)) ? await workspaces.resolve(repo, e.bookmark) : null;
+    const onTrunk = tip ? await workspaces.isAncestor(repo, tip, await workspaces.resolve(repo, repo.base)) : false;
+    return { ...e, tip, on_trunk: onTrunk };
+  }
+
+  /** Throws unless tickets in `repo` can join epic `epicId` (open, same repo). */
+  validateEpic(repo: string, epicId: number): Epic {
+    const e = this.deps.store.getEpic(epicId);
+    if (!e) throw new RunError(`epic ${epicId} not found`, 404);
+    if (e.repo !== repo) throw new RunError(`epic ${epicId} is in repo "${e.repo}", not "${repo}"`, 409);
+    if (e.status !== "open") throw new RunError(`epic ${epicId} is closed`, 409);
+    return e;
+  }
+
+  /** Put a ticket that hasn't started in an epic, or take it out. */
+  setEpic(id: number, epicId: number | null): Ticket {
+    const { tickets, hub } = this.deps;
+    const ticket = tickets.get(id);
+    if (!ticket) throw new RunError(`ticket #${id} not found`, 404);
+    if (isRunnerTicket(ticket)) throw new RunError(`ticket #${id} is a runner's own ticket`, 409);
+    if (!["todo", "proposed", "held"].includes(ticket.status)) {
+      throw new RunError(`ticket #${id} is ${ticket.status}; only a ticket that hasn't started can join or leave an epic`, 409);
+    }
+    if (epicId !== null) this.validateEpic(ticket.repo, epicId);
+    if (ticket.builds_on) this.validateBuildsOn(ticket.repo, ticket.builds_on, id, epicId);
+    const t = tickets.setEpic(id, epicId);
+    hub.ticket(t);
+    return t;
+  }
+
+  /**
+   * Close an epic once its branch is on trunk (or it's given up). Its tickets must all be done or
+   * cancelled first. The bookmark is left alone.
+   */
+  closeEpic(id: number): Epic {
+    const e = this.getEpic(id);
+    if (e.status === "closed") return e;
+    const open = e.tickets.filter((t) => t.status !== "done" && t.status !== "cancelled");
+    if (open.length) {
+      throw new RunError(
+        `epic ${id} still has unfinished tickets: ${open.map((t) => `#${t.id} (${t.status})`).join(", ")}. Finish or cancel them, or take them out of the epic (acutis ticket epic <id> none), first.`,
+        409,
+      );
+    }
+    this.deps.store.setEpicStatus(id, "closed");
+    return this.getEpic(id);
   }
 
   private landedRunOf(ticketId: number): Run | undefined {
@@ -462,18 +605,25 @@ export class RunManager {
     if (!["todo", "proposed", "held"].includes(ticket.status)) {
       throw new RunError(`ticket #${id} is ${ticket.status}; only a ticket that hasn't started can change what it builds on`, 409);
     }
-    if (buildsOn !== null) this.validateBuildsOn(ticket.repo, buildsOn, id);
+    if (buildsOn !== null) this.validateBuildsOn(ticket.repo, buildsOn, id, ticket.epic_id);
     const t = tickets.setBuildsOn(id, buildsOn);
     hub.ticket(t);
     return t;
   }
 
-  /** Throws unless `parentId` is an ordinary ticket in `repo` that `childId` (if it exists yet) may build on. */
-  validateBuildsOn(repo: string, parentId: number, childId?: number) {
+  /**
+   * Throws unless `parentId` is an ordinary ticket in `repo` that `childId` (if it exists yet) may
+   * build on. A parent in an open epic needs the child in that epic too (`epicId`: the child's).
+   */
+  validateBuildsOn(repo: string, parentId: number, childId?: number, epicId?: number | null) {
     const parent = this.deps.tickets.get(parentId);
     if (!parent) throw new RunError(`ticket #${parentId} not found`, 404);
     if (parent.repo !== repo) throw new RunError(`ticket #${parentId} is in repo "${parent.repo}", not "${repo}"`, 409);
     if (isRunnerTicket(parent)) throw new RunError(`ticket #${parentId} is a runner's own ticket`, 409);
+    const parentEpic = parent.epic_id ? this.deps.store.getEpic(parent.epic_id) : null;
+    if (parentEpic?.status === "open" && parentEpic.id !== (epicId ?? null)) {
+      throw new RunError(`ticket #${parentId} is in epic ${parentEpic.id}: a ticket that builds on it must be in epic ${parentEpic.id} too`, 409);
+    }
     if (childId === undefined) return;
     // Walk up from the parent: reaching the child would make a cycle.
     const seen = new Set<number>();
@@ -537,7 +687,10 @@ export class RunManager {
       msg: `Workflow from ${workflow.source}; base ${repo.base} = ${trunk.slice(0, 12)}`,
       gates: workflow.gates.map(describeGate),
     });
-    const start = run.kind === "work" ? await this.startPoint(repo, ticket, trunk) : { commit: trunk, stackedOn: null, msg: null };
+    if (run.kind === "work" && ticket.epic_id && workflow.land === "trunk") {
+      throw new RunError(`ticket #${ticket.id} is in epic ${ticket.epic_id}, but this repo lands on trunk (land: trunk); epics need land: bookmark or push. Take it out of the epic (acutis ticket epic ${ticket.id} none) and start it again.`, 409);
+    }
+    const start = run.kind === "work" ? await this.startPoint(repo, ticket, trunk) : { commit: trunk, stackedOn: null, epic: null, msg: null };
     if (start.msg) hub.emit(run.id, "system.log", { msg: start.msg });
     const base = start.commit;
     const ws = await workspaces.create(repo, `acutis-t${ticket.id}-r${run.id}`, base);
@@ -559,6 +712,7 @@ export class RunManager {
       ws,
       trunkCommit: trunk,
       stackedOn: start.stackedOn,
+      epic: start.epic,
       session: null,
       intent: null,
       permissions: new Map(),
@@ -866,7 +1020,9 @@ export class RunManager {
     // Older runs have no trunk_commit: they always started on trunk.
     const trunkCommit = run.trunk_commit ?? run.base_commit;
     const workflow = await this.loadWorkflow(repo, trunkCommit);
-    const stackedOn = trunkCommit !== run.base_commit && ticket.builds_on ? this.deps.tickets.get(ticket.builds_on) : null;
+    const onBranch = trunkCommit !== run.base_commit;
+    const epic = onBranch && ticket.epic_id ? this.deps.store.getEpic(ticket.epic_id) : null;
+    const stackedOn = onBranch && !epic && ticket.builds_on ? this.deps.tickets.get(ticket.builds_on) : null;
     const a: Active = {
       repo,
       ticket,
@@ -874,6 +1030,7 @@ export class RunManager {
       ws: { name: run.workspace_name, path: run.workspace_path, baseCommit: run.base_commit },
       trunkCommit,
       stackedOn,
+      epic,
       session: null,
       intent: null,
       permissions: new Map(),
@@ -958,6 +1115,7 @@ export class RunManager {
           lessons,
           librarian: Boolean(a.workflow.library && a.workflow.library.librarian && this.deps.oneShot),
           stackedOn: a.stackedOn ? { id: a.stackedOn.id, title: a.stackedOn.title, trunk: a.repo.base } : undefined,
+          epic: a.epic ? { id: a.epic.id, title: a.epic.title, bookmark: a.epic.bookmark, trunk: a.repo.base } : undefined,
         });
     const session = this.deps.runner.start({
       cwd: a.ws.path,
@@ -2075,6 +2233,9 @@ export class RunManager {
           parent = after;
         }
         x.workRequests++;
+        // A follow-up joins its parent's open epic, so it starts on (and lands onto) the same branch.
+        const parentEpicId = followUp ? (this.deps.tickets.get(parent)?.epic_id ?? null) : null;
+        const epicId = parentEpicId && this.deps.store.getEpic(parentEpicId)?.status === "open" ? parentEpicId : null;
         const t = this.deps.tickets.create({
           repo: x.repo.name,
           title,
@@ -2091,13 +2252,14 @@ export class RunManager {
           status: "proposed",
           // Only ever the requester's own ticket: a worker can't point tickets at arbitrary work.
           builds_on: followUp ? parent : null,
+          epic_id: epicId,
           origin_run_id: runId,
         });
         this.deps.hub.ticket(t);
         this.deps.hub.emit(runId, "work.request", { ticket: t.id, title, status: t.status, ...(followUp ? { follow_up: true } : {}) });
         return {
           text: followUp
-            ? `Filed as proposed follow-up ticket #${t.id}, building on #${parent}: it starts on top of that work once it lands, so don't do it here; mention it in your final summary. A later step that needs this one can pass after: ${t.id}.`
+            ? `Filed as proposed follow-up ticket #${t.id}, building on #${parent}${epicId ? ` in epic ${epicId}` : ""}: it starts on top of that work once it lands, so don't do it here; mention it in your final summary. A later step that needs this one can pass after: ${t.id}.`
             : `Filed as proposed ticket #${t.id} for the operator. Don't do that work here: carry on with your ticket, and say in your final summary what is unfinished until #${t.id} lands.`,
         };
       },
@@ -2350,7 +2512,7 @@ export class RunManager {
    * workspace; optionally start a worker on the new ticket. Once only: the check and the save
    * happen with no await between them.
    */
-  async saveDraft(runId: number, input: { title?: string; body?: string; start?: boolean; builds_on?: number | null }): Promise<{ ticket: Ticket; run?: Run }> {
+  async saveDraft(runId: number, input: { title?: string; body?: string; start?: boolean; builds_on?: number | null; epic_id?: number | null }): Promise<{ ticket: Ticket; run?: Run }> {
     const run = this.mustWriter(runId);
     if (run.state === "queued" || run.state === "preparing" || run.state === "running") {
       throw new RunError(`wait for the writer to finish its turn, or stop it first (it is ${run.state})`, 409);
@@ -2362,12 +2524,14 @@ export class RunManager {
     const body = clip(input.body ?? view.draft?.body ?? "", MAX_DRAFT_BODY);
     if (!title) throw new RunError("the ticket needs a title");
     const buildsOn = input.builds_on ?? null;
+    const epicId = input.epic_id ?? null;
+    if (epicId !== null) this.validateEpic(run.repo, epicId);
     if (buildsOn !== null) {
-      this.validateBuildsOn(run.repo, buildsOn);
+      this.validateBuildsOn(run.repo, buildsOn, undefined, epicId);
       // Refuse before saving, so "save & start" doesn't leave a saved ticket and an error.
       if (input.start) this.checkBuildsOnLanded({ id: 0, repo: run.repo, builds_on: buildsOn });
     }
-    const ticket = this.deps.tickets.create({ repo: run.repo, title, body, source: WRITER_SOURCE, builds_on: buildsOn, origin_run_id: runId });
+    const ticket = this.deps.tickets.create({ repo: run.repo, title, body, source: WRITER_SOURCE, builds_on: buildsOn, epic_id: epicId, origin_run_id: runId });
     this.deps.hub.ticket(ticket);
     this.deps.hub.emit(runId, "writer.saved", { ticket_id: ticket.id, edited: Boolean(view.draft && (title !== view.draft.title || body !== view.draft.body)) });
     const a = this.active.get(runId);
@@ -3154,8 +3318,12 @@ ${this.workSnapshot(repo)}${gapList}`;
     };
     let bookmark: string;
     let landed: string;
+    const epic = a.ticket.epic_id ? store.getEpic(a.ticket.epic_id) : null;
     try {
-      if (a.workflow.land === "trunk") {
+      if (a.ticket.epic_id) {
+        if (!epic) return back(`epic ${a.ticket.epic_id} no longer exists`);
+        bookmark = await this.landOnEpic(runId, a, epic, message, back);
+      } else if (a.workflow.land === "trunk") {
         if (!(await workspaces.isBookmark(a.repo, a.repo.base))) {
           return back(`land: trunk needs the repo's base ("${a.repo.base}") to be a bookmark`);
         }
@@ -3230,15 +3398,59 @@ ${this.workSnapshot(repo)}${gapList}`;
     }
     hub.run(store.updateRun(runId, { bookmark, landed_commit: landed, workspace_path: null }));
     this.active.delete(runId);
-    this.setState(runId, "done", a.workflow.land === "trunk" ? `landed on ${bookmark}` : `landed as bookmark ${bookmark}`);
+    this.setState(runId, "done", epic ? `landed on epic ${epic.id} (${bookmark})` : a.workflow.land === "trunk" ? `landed on ${bookmark}` : `landed as bookmark ${bookmark}`);
     hub.ticket(this.deps.tickets.setStatus(a.ticket.id, "done"));
-    if (a.workflow.land === "trunk" && changedContracts.length) this.noticeContractChange(runId, a.repo.name, changedContracts);
+    if (!epic && a.workflow.land === "trunk" && changedContracts.length) this.noticeContractChange(runId, a.repo.name, changedContracts);
     // Trunk moved: scouts watching what this landing touched may wake.
-    if (a.workflow.land === "trunk") {
+    if (!epic && a.workflow.land === "trunk") {
       void this.checkTriggers(a.repo.name).catch(() => {});
       void this.checkLessons(a.repo.name, runId).catch(() => {});
     }
     return { landed: true };
+  }
+
+  /**
+   * Land an epic ticket's run by moving the epic's bookmark forward to it. If the branch moved
+   * since the run started (another of the epic's tickets landed), the change is rebased onto the
+   * new tip and checked again: nobody has checked that combination. Only the workspace's base moves;
+   * policy and contracts still come from the trunk the run started with.
+   */
+  private async landOnEpic(runId: number, a: Active, epic: Epic, message: string, back: (reason: string, status?: number) => never): Promise<string> {
+    const { workspaces, hub, store } = this.deps;
+    if (a.workflow.land === "trunk") {
+      return back(`ticket #${a.ticket.id} is in epic ${epic.id}, but this repo lands on trunk (land: trunk); epics need land: bookmark or push. Discard this run, take the ticket out of the epic and start it again.`);
+    }
+    if (epic.status !== "open") return back(`epic ${epic.id} is closed`);
+    await workspaces.land(a.repo, a.ws, { message, bookmark: null, push: false });
+    const tip = (await workspaces.isBookmark(a.repo, epic.bookmark)) ? await workspaces.resolve(a.repo, epic.bookmark) : null;
+    // The tip is already under the change (it started there, or on a trunk that holds it): moving
+    // the bookmark is a fast-forward. Otherwise it moved on since the run started.
+    const onto = tip && tip !== a.ws.baseCommit && !(await workspaces.isAncestor(a.repo, tip, a.ws.baseCommit)) ? tip : a.ws.baseCommit;
+    // Always asked, even when nothing moves: a change an earlier, stopped landing rebased already
+    // sits on the tip but may still be conflicted.
+    const { moved, conflicts } = await workspaces.rebase(a.repo, a.ws, onto);
+    if (moved) {
+      a.ws = { ...a.ws, baseCommit: onto };
+      a.epic = epic;
+      a.stackedOn = null;
+      hub.run(store.updateRun(runId, { base_commit: onto }));
+    }
+    if (conflicts.length) {
+      return back(
+        `rebasing onto epic ${epic.id}'s branch (${epic.bookmark} at ${onto.slice(0, 12)}) left conflicts in: ${conflicts.join(", ")}. Send it back to the agent to resolve them, then approve again.`,
+      );
+    }
+    if (moved) {
+      hub.emit(runId, "system.log", { msg: `Rebased onto epic ${epic.id}'s branch ${epic.bookmark} (${onto.slice(0, 12)}); re-running checks on the combined result` });
+      this.previews.stop(runId);
+      const failures = await this.runGates(runId, a, "landing");
+      if (failures === null) return back("run changed state during the re-check");
+      hub.run(store.updateRun(runId, { gates_ok: a.workflow.gates.length ? (failures.length ? 0 : 1) : null }));
+      if (failures.length) return back(`checks fail after rebasing onto epic ${epic.id}'s branch. Send it back to the agent with the failures, then approve again.`);
+    }
+    await workspaces.advance(a.repo, a.ws, epic.bookmark, { push: a.workflow.land === "push" });
+    hub.emit(runId, "system.log", { msg: `Epic ${epic.id}'s branch ${epic.bookmark} now includes this change.` });
+    return epic.bookmark;
   }
 
   /**

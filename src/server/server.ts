@@ -21,6 +21,13 @@ function buildsOnArg(v: unknown): number | null {
   return v;
 }
 
+/** An epic id, or null (absent, null or 0 take the ticket out). */
+function epicArg(v: unknown): number | null {
+  if (v === undefined || v === null || v === 0) return null;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) throw new RunError("epic_id must be an epic id or null", 400);
+  return v;
+}
+
 export function startServer(app: App, opts: { hostname?: string; development?: boolean } = {}) {
   const { runs, tickets, store, hub, cfg } = app;
   const hostname = opts.hostname ?? "127.0.0.1";
@@ -88,6 +95,7 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
           scoutTypes: Object.entries(SCOUT_TYPES).map(([id, s]) => ({ id, title: s.title })),
           browser: app.browser.available,
           permissions: runs.allPendingPermissions(),
+          epics: store.listEpics(),
         })),
       },
       "/api/permissions": { GET: api(() => runs.allPendingPermissions()) },
@@ -148,6 +156,7 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
             body: typeof b.body === "string" ? b.body : undefined,
             start: b.start === true,
             builds_on: buildsOnArg(b.builds_on),
+            epic_id: epicArg(b.epic_id),
           });
         }),
       },
@@ -215,8 +224,10 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
           if (!b.repo || !store.getRepo(b.repo)) throw new RunError(`unknown repo "${b.repo}"`, 400);
           if (!b.title?.trim()) throw new RunError("title is required", 400);
           const buildsOn = buildsOnArg(b.builds_on);
-          if (buildsOn !== null) runs.validateBuildsOn(b.repo, buildsOn);
-          const t = tickets.create({ repo: b.repo, title: b.title.trim(), body: (b.body ?? "").trim(), builds_on: buildsOn });
+          const epicId = epicArg(b.epic_id);
+          if (epicId !== null) runs.validateEpic(b.repo, epicId);
+          if (buildsOn !== null) runs.validateBuildsOn(b.repo, buildsOn, undefined, epicId);
+          const t = tickets.create({ repo: b.repo, title: b.title.trim(), body: (b.body ?? "").trim(), builds_on: buildsOn, epic_id: epicId });
           hub.ticket(t);
           return t;
         }),
@@ -225,6 +236,22 @@ export function startServer(app: App, opts: { hostname?: string; development?: b
       "/api/tickets/:id/builds-on": {
         POST: api(async (req) => runs.setBuildsOn(Number(req.params.id), buildsOnArg((await body(req)).builds_on))),
       },
+      "/api/tickets/:id/epic": {
+        POST: api(async (req) => runs.setEpic(Number(req.params.id), epicArg((await body(req)).epic_id))),
+      },
+      "/api/epics": {
+        GET: api((req) => {
+          const q = new URL(req.url).searchParams;
+          return runs.listEpics({ repo: q.get("repo") ?? undefined, all: q.get("status") === "all" });
+        }),
+        POST: api(async (req) => {
+          const b = await body(req);
+          if (typeof b.repo !== "string" || typeof b.title !== "string") throw new RunError("repo and title are required", 400);
+          return runs.createEpic(b.repo, b.title);
+        }),
+      },
+      "/api/epics/:id": { GET: api((req) => runs.epicDetail(Number(req.params.id))) },
+      "/api/epics/:id/close": { POST: api((req) => runs.closeEpic(Number(req.params.id))) },
       "/api/tickets/:id/cancel": {
         POST: api((req) => {
           const t = tickets.get(Number(req.params.id));
